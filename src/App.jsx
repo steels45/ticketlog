@@ -1,4 +1,10 @@
 import { useState, useEffect, useRef } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.REACT_APP_SUPABASE_URL,
+  process.env.REACT_APP_SUPABASE_ANON_KEY
+);
 
 const VIEWS = { HOME: "home", CAPTURE: "capture", REVIEW: "review", ADMIN: "admin" };
 
@@ -423,16 +429,16 @@ export default function App() {
   useEffect(() => {
     async function init() {
       try {
-        // Load roster
-        const r = await window.storage.get("roster", true);
-        if (r) setRoster(JSON.parse(r.value));
-        // Load admin PIN
-        const ap = await window.storage.get("adminPin", true);
-        if (ap) setAdminPin(ap.value);
-        // Restore session
-        const sess = await window.storage.get("session", false);
+        // Load roster from Supabase
+        const { data: drivers } = await supabase.from("drivers").select("*").order("name");
+        if (drivers) setRoster(drivers.map(d => ({ name: d.name, pin: d.pin })));
+        // Load admin PIN from localStorage
+        const ap = localStorage.getItem("adminPin");
+        if (ap) setAdminPin(ap);
+        // Restore session from localStorage
+        const sess = localStorage.getItem("session");
         if (sess) {
-          const { name, role } = JSON.parse(sess.value);
+          const { name, role } = JSON.parse(sess);
           if (role === "driver") { setDriverName(name); setAuthState("driver"); loadTickets(); }
           else if (role === "admin") { setAuthState("admin"); loadTickets(); }
           else setAuthState("driver-login");
@@ -446,7 +452,13 @@ export default function App() {
 
   async function saveRoster(newRoster) {
     setRoster(newRoster);
-    try { await window.storage.set("roster", JSON.stringify(newRoster), true); } catch {}
+    try {
+      // Sync to Supabase — delete all and reinsert
+      await supabase.from("drivers").delete().neq("name", "");
+      if (newRoster.length > 0) {
+        await supabase.from("drivers").insert(newRoster.map(d => ({ name: d.name, pin: d.pin })));
+      }
+    } catch {}
   }
 
   async function handleDriverLogin() {
@@ -455,7 +467,7 @@ export default function App() {
     if (!driver) { setLoginError("Name or PIN is incorrect."); setLoginPin(""); return; }
     setDriverName(driver.name);
     setAuthState("driver");
-    try { await window.storage.set("session", JSON.stringify({ name: driver.name, role: "driver" }), false); } catch {}
+    try { localStorage.setItem("session", JSON.stringify({ name: driver.name, role: "driver" })); } catch {}
     loadTickets();
   }
 
@@ -463,12 +475,12 @@ export default function App() {
     setLoginError("");
     if (loginPin.trim() !== adminPin) { setLoginError("Incorrect admin PIN."); setLoginPin(""); return; }
     setAuthState("admin");
-    try { await window.storage.set("session", JSON.stringify({ name: "admin", role: "admin" }), false); } catch {}
+    try { localStorage.setItem("session", JSON.stringify({ name: "admin", role: "admin" })); } catch {}
     loadTickets();
   }
 
   async function handleLogout() {
-    try { await window.storage.delete("session", false); } catch {}
+    try { localStorage.removeItem("session"); } catch {}
     setDriverName(""); setLoginName(""); setLoginPin(""); setLoginError("");
     setAuthState("driver-login"); setView(VIEWS.HOME); resetCapture();
   }
@@ -498,14 +510,16 @@ export default function App() {
 
   async function loadTickets() {
     try {
-      const result = await window.storage.list("ticket:", true);
-      if (result?.keys?.length) {
-        const all = await Promise.all(result.keys.map(async (k) => {
-          const r = await window.storage.get(k, true);
-          return r ? JSON.parse(r.value) : null;
-        }));
-        setTickets(all.filter(Boolean).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
-      }
+      const { data } = await supabase
+        .from("tickets")
+        .select("*")
+        .order("timestamp", { ascending: false });
+      if (data) setTickets(data.map(t => ({
+        ...t,
+        driverName: t.driver_name,
+        loadNumber: t.load_number,
+        blurScore: t.blur_score,
+      })));
     } catch {}
   }
 
@@ -574,7 +588,19 @@ export default function App() {
       flagged: flags.length > 0,
     };
     try {
-      await window.storage.set(ticket.id, JSON.stringify(ticket), true);
+      const { error } = await supabase.from("tickets").insert({
+        id: ticket.id,
+        driver_name: ticket.driverName,
+        load_number: ticket.loadNumber,
+        timestamp: ticket.timestamp,
+        image: ticket.image,
+        data: ticket.data,
+        gps: ticket.gps,
+        blur_score: ticket.blurScore,
+        flags: ticket.flags,
+        flagged: ticket.flagged,
+      });
+      if (error) throw error;
       setTickets((prev) => [ticket, ...prev]);
       resetCapture();
       setView(VIEWS.HOME);
@@ -959,7 +985,7 @@ export default function App() {
               {/* Admin PIN change */}
               <AdminPinChanger currentPin={adminPin} onSave={async (p) => {
                 setAdminPin(p);
-                try { await window.storage.set("adminPin", p, true); } catch {}
+                try { localStorage.setItem("adminPin", p); } catch {}
                 setRosterMsg("✓ Admin PIN updated.");
               }} />
             </div>

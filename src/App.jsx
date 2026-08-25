@@ -69,6 +69,7 @@ async function getGPSLocation() {
 }
 
 // ── AI EXTRACTION WITH TICKET PROFILES ───────────────────────────────────
+// eslint-disable-next-line no-unused-vars
 const EXTRACTION_PROMPT = `You are an expert at reading trucking and hauling weight tickets from multiple suppliers.
 
 You will see a ticket image. First identify which supplier issued it by looking for logos, company names, or distinctive layouts. Then extract the data using that supplier's field names.
@@ -378,17 +379,6 @@ function exportPDF(tickets, dateLabel) {
 //   1. Driver inactive > X hours: check lastTicketTime per driver in Supabase
 //   2. New job assignment: admin writes to notifications table, FCM fans out
 //   3. Flagged ticket submitted: trigger on ticket save if flags.length > 0
-const PUSH_STUB = {
-  isSupported: () => "Notification" in window && "serviceWorker" in navigator,
-  requestPermission: async () => Notification.requestPermission(),
-  // In production: subscribe(driverName) → save FCM token to Supabase users table
-  subscribe: async (driverName) => console.log(`[PUSH STUB] Subscribe ${driverName}`),
-  // In production: send via FCM server API or Supabase edge function
-  notify: (title, body) => {
-    if (Notification.permission === "granted") new Notification(title, { body, icon: "/icon.png" });
-  },
-};
-
 
 // ── DEFAULT ROSTER (used first time, then stored in shared storage) ────────
 const DEFAULT_DRIVERS = [
@@ -409,7 +399,6 @@ export default function App() {
   const [adminPin, setAdminPin]   = useState(ADMIN_PIN);
   const [loginError, setLoginError] = useState("");
   // Roster management
-  const [rosterView, setRosterView] = useState(false);
   const [newDriverName, setNewDriverName] = useState("");
   const [newDriverPin, setNewDriverPin]   = useState("");
   const [rosterMsg, setRosterMsg] = useState("");

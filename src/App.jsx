@@ -581,7 +581,43 @@ export default function App() {
                         {blurWarning?"Blurry — consider retaking":"Image looks sharp"}
                       </span>
                     </div>
-                  )}} onClick={()=>setPeriodOffset(p=>p+1)}>›</button>
+                  )}
+
+                  {/* GPS */}
+                  <div style={{...S.statusChip,borderColor:gpsStatus==="ok"?"#86efac":gpsStatus==="failed"?"#fca5a5":"#e2e8f0",background:gpsStatus==="ok"?"#f0fdf4":"#f8fafc"}}>
+                    <span style={{fontSize:10,color:gpsStatus==="ok"?"#16a34a":gpsStatus==="failed"?"#dc2626":"#94a3b8"}}>●</span>
+                    <span style={{fontSize:13,color:gpsStatus==="ok"?"#16a34a":gpsStatus==="failed"?"#dc2626":"#64748b"}}>
+                      {gpsStatus==="fetching"?"Acquiring GPS…":gpsStatus==="ok"?`GPS locked · ±${gpsData?.accuracy}m`:"GPS unavailable"}
+                    </span>
+                  </div>
+                </div>
+
+                {loadError&&<div style={S.errorBox}>{loadError}</div>}
+
+                <div style={S.actionRow}>
+                  {blurWarning?(
+                    <>
+                      <button style={S.solidBtn} onClick={()=>{resetCapture();setTimeout(()=>fileRef.current?.click(),100);}}>📷 Retake</button>
+                      <button style={{...S.outlineBtn}} onClick={handleAnalyze} disabled={loading}>{loading?"Analyzing…":"Use Anyway"}</button>
+                    </>
+                  ):(
+                    <button style={{...S.solidBtn,width:"100%"}} onClick={handleAnalyze} disabled={loading}>
+                      {loading?"Analyzing ticket…":"✦ Extract Ticket Data"}
+                    </button>
+                  )}
+                </div>
+                <button style={S.ghostLink} onClick={resetCapture}>Cancel</button>
+              </div>
+            )}
+
+            {/* Period navigation */}
+            <div style={S.periodNav}>
+              <button style={S.periodNavBtn} onClick={()=>setPeriodOffset(p=>p-1)}>‹</button>
+              <div style={S.periodNavCenter}>
+                <div style={S.periodNavLabel}>{periodOffset===0?"This Week":periodOffset===-1?"Last Week":`${Math.abs(periodOffset)} weeks ago`}</div>
+                <div style={S.periodNavDates}>{periodLabel(currentPeriod)}</div>
+              </div>
+              <button style={{...S.periodNavBtn,...(periodOffset===0?{opacity:.3,pointerEvents:"none"}:{})}} onClick={()=>setPeriodOffset(p=>p+1)}>›</button>
             </div>
 
             {/* Period summary */}

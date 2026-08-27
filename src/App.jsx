@@ -610,7 +610,66 @@ export default function App() {
               </div>
             )}
 
-            {/* Period navigation */}
+            {captureStep==="review" && (
+              <div style={S.captureStepWrap}>
+                <div style={S.reviewHeader}>
+                  <img src={previewImg} alt="" style={S.reviewThumb} />
+                  <div style={S.reviewHeaderInfo}>
+                    {editData.supplier&&<div style={S.reviewSupplier}>{editData.supplier}</div>}
+                    {editData.ticketNumber&&<div style={S.reviewTicketNum}>#{editData.ticketNumber}</div>}
+                    {editData.netTons&&(
+                      <div style={S.netTonsBadge}>
+                        <span style={S.netTonsNum}>{editData.netTons}</span>
+                        <span style={S.netTonsLabel}>NET TONS</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {duplicateWarning&&(
+                  <div style={S.dupWarning}>
+                    <div style={S.dupWarningTitle}>⚠️ Duplicate Ticket #{duplicateWarning.ticketNumber}</div>
+                    <div style={S.dupWarningText}>Already submitted by <strong>{duplicateWarning.submittedBy}</strong> at {formatTime(duplicateWarning.submittedAt)}. Verify before saving.</div>
+                  </div>
+                )}
+                {editData.signaturePresent===false&&editData.stampPresent===false&&(
+                  <div style={{...S.warnChip,borderColor:"#fca5a5",background:"#fef2f2"}}>
+                    <span>✍️</span>
+                    <span style={{fontSize:13,color:"#dc2626",fontWeight:600}}>No signature or stamp detected — ticket will be flagged</span>
+                  </div>
+                )}
+                <div style={S.fieldsGrid}>
+                  {Object.entries(FIELD_LABELS).filter(([k])=>k!=="signaturePresent"&&k!=="stampPresent").map(([key,label])=>(
+                    <div key={key} style={key==="notes"||key==="location"||key==="customer"?{...S.fieldWrap,gridColumn:"span 2"}:S.fieldWrap}>
+                      <label style={S.fieldLabel}>{label}</label>
+                      <input style={S.fieldInput} value={editData[key]||""}
+                        onChange={e=>setEditData(p=>({...p,[key]:e.target.value}))} placeholder="—" />
+                    </div>
+                  ))}
+                </div>
+                {loadError&&<div style={S.errorBox}>{loadError}</div>}
+                {duplicateWarning?(
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    <button style={{...S.solidBtn,width:"100%",background:"#dc2626"}} onClick={()=>handleSave(true)} disabled={saving}>
+                      {saving?"Saving…":"Save Anyway (Override Duplicate)"}
+                    </button>
+                    <button style={{...S.outlineBtn,width:"100%"}} onClick={resetCapture}>Discard</button>
+                  </div>
+                ):(
+                  <>
+                    <button style={{...S.solidBtn,width:"100%"}} onClick={()=>handleSave(false)} disabled={saving}>
+                      {saving?"Saving…":"✓ Save Ticket"}
+                    </button>
+                    <button style={S.ghostLink} onClick={resetCapture}>Discard</button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── MY LOADS TAB ── */}
+        {driverTab==="period" && (
+          <div style={S.periodWrap}>
             <div style={S.periodNav}>
               <button style={S.periodNavBtn} onClick={()=>setPeriodOffset(p=>p-1)}>‹</button>
               <div style={S.periodNavCenter}>

@@ -42,6 +42,13 @@ function periodLabel(period) {
   return `${period.start.toLocaleDateString([],{month:"short",day:"numeric"})} – ${period.end.toLocaleDateString([],{month:"short",day:"numeric",year:"numeric"})}`;
 }
 
+// ── BROKER COLORS ─────────────────────────────────────────────────────────
+const BROKER_COLORS = ["#1e3a5f","#16a34a","#7c3aed","#ea580c","#0891b2","#be185d","#854d0e","#065f46"];
+function brokerColor(brokers, name) {
+  const idx = brokers.findIndex(b=>b.name===name);
+  return BROKER_COLORS[idx % BROKER_COLORS.length] || "#64748b";
+}
+
 // ── BACKGROUND TRIM ───────────────────────────────────────────────────────
 
 // ── BLUR DETECTION ────────────────────────────────────────────────────────
@@ -195,7 +202,7 @@ function exportCSV(tickets) {
   a.click(); URL.revokeObjectURL(url);
 }
 
-function exportImagePDF(tickets, label) {
+function exportImagePDF(tickets, label, broker=null) {
   const sorted=[...tickets].sort((a,b)=>{
     if(a.driverName!==b.driverName) return a.driverName.localeCompare(b.driverName);
     if(a.timestamp!==b.timestamp) return new Date(a.timestamp)-new Date(b.timestamp);
@@ -218,7 +225,7 @@ function exportImagePDF(tickets, label) {
   const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Ticket Images — ${label}</title>
   <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,Arial,sans-serif}
   .cover{background:#1e3a5f;color:#fff;padding:40px 48px}.cover-title{font-size:26px;font-weight:800;color:#f0a500}
-  .cover-sub{font-size:13px;color:#94a3b8;margin-top:4px}.stats{display:flex;gap:40px;margin-top:20px}
+  .cover-sub{font-size:13px;color:#94a3b8;margin-top:4px}.broker-block{margin-top:20px;padding:16px;background:rgba(255,255,255,0.08);border-radius:8px;border-left:3px solid #f0a500}.broker-to{font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}.broker-name{font-size:18px;font-weight:800;color:#fff}.broker-addr,.broker-email{font-size:13px;color:#94a3b8;margin-top:2px}.stats{display:flex;gap:40px;margin-top:20px}
   .sn{font-size:32px;font-weight:800;color:#f0a500;font-family:monospace}.sl{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.08em}
   .page{padding:20px 32px;border-bottom:2px solid #e2e8f0;page-break-inside:avoid}
   .ph{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
@@ -231,6 +238,7 @@ function exportImagePDF(tickets, label) {
   @media print{.page{border:none}}</style></head><body>
   <div class="cover"><div class="cover-title">TicketLog — Ticket Images</div>
   <div class="cover-sub">${label} · Generated ${formatDate(new Date().toISOString())} ${formatTime(new Date().toISOString())}</div>
+  ${broker?`<div class="broker-block"><div class="broker-to">Bill To:</div><div class="broker-name">${broker.name}</div>${broker.address?`<div class="broker-addr">${broker.address}</div>`:""} ${broker.email?`<div class="broker-email">${broker.email}</div>`:""}</div>`:""}
   <div class="stats">
     <div><div class="sn">${sorted.length}</div><div class="sl">Tickets</div></div>
     <div><div class="sn">${totalTons.toFixed(1)}</div><div class="sl">Net Tons</div></div>
@@ -275,6 +283,13 @@ export default function App() {
   // Admin
   const [adminTab, setAdminTab] = useState("tickets"); // tickets | export | roster
   const [adminPeriodOffset, setAdminPeriodOffset] = useState(0);
+  const [brokerFilter, setBrokerFilter] = useState("all"); // all | unassigned | broker name
+  // Brokers
+  const [brokers, setBrokers] = useState([]);
+  const [newBrokerName, setNewBrokerName] = useState("");
+  const [newBrokerEmail, setNewBrokerEmail] = useState("");
+  const [newBrokerAddress, setNewBrokerAddress] = useState("");
+  const [brokerMsg, setBrokerMsg] = useState("");
   // Roster mgmt
   const [newDriverName, setNewDriverName] = useState("");
   const [newDriverPin, setNewDriverPin] = useState("");
@@ -304,6 +319,8 @@ export default function App() {
       try {
         const { data: drivers } = await supabase.from("drivers").select("*").order("name");
         if (drivers?.length) setRoster(drivers.map(d=>({name:d.name,pin:d.pin})));
+        const { data: brokerData } = await supabase.from("brokers").select("*").order("name");
+        if (brokerData?.length) setBrokers(brokerData);
         const ap = localStorage.getItem("adminPin");
         if (ap) setAdminPin(ap);
         const sess = localStorage.getItem("session");
@@ -380,6 +397,34 @@ export default function App() {
     if (newPin.length!==5||!/^\d+$/.test(newPin)) return;
     await saveRoster(roster.map(d=>d.name===name?{...d,pin:newPin}:d));
     setRosterMsg(`✓ PIN updated for ${name}.`);
+  }
+
+  async function handleAddBroker() {
+    setBrokerMsg("");
+    if (!newBrokerName.trim()) { setBrokerMsg("Enter a company name."); return; }
+    if (brokers.find(b=>b.name.toLowerCase()===newBrokerName.trim().toLowerCase())) { setBrokerMsg("Broker already exists."); return; }
+    const broker = { name:newBrokerName.trim(), email:newBrokerEmail.trim(), address:newBrokerAddress.trim() };
+    try {
+      const { data } = await supabase.from("brokers").insert(broker).select().single();
+      if (data) setBrokers(prev=>[...prev, data]);
+      setNewBrokerName(""); setNewBrokerEmail(""); setNewBrokerAddress("");
+      setBrokerMsg(`✓ ${broker.name} added.`);
+    } catch { setBrokerMsg("Failed to add broker."); }
+  }
+
+  async function handleRemoveBroker(id) {
+    try {
+      await supabase.from("brokers").delete().eq("id", id);
+      setBrokers(prev=>prev.filter(b=>b.id!==id));
+    } catch {}
+  }
+
+  async function assignBroker(ticketId, brokerName) {
+    try {
+      await supabase.from("tickets").update({ broker: brokerName }).eq("id", ticketId);
+      setTickets(prev=>prev.map(t=>t.id===ticketId?{...t,broker:brokerName}:t));
+      if (selectedTicket?.id===ticketId) setSelectedTicket(prev=>({...prev,broker:brokerName}));
+    } catch {}
   }
 
   // ── CAPTURE ───────────────────────────────────────────────────────────────
@@ -797,39 +842,67 @@ export default function App() {
         <div style={S.adminBody}>
           {/* TICKETS TAB */}
           {adminTab==="tickets"&&(
-            <div style={S.ticketList}>
-              {adminPeriodTickets.length===0&&<div style={S.emptyState}><div style={S.emptyIcon}>📋</div><div style={S.emptyText}>No tickets this period</div></div>}
-              {[...adminPeriodTickets].sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)).map(t=>(
-                <AdminTicketCard key={t.id} ticket={t} onClick={()=>setSelectedTicket(t)} />
-              ))}
+            <div>
+              {/* Broker filter bar */}
+              <div style={S.brokerFilterBar}>
+                <button style={{...S.brokerFilterBtn,...(brokerFilter==="all"?S.brokerFilterActive:{})}} onClick={()=>setBrokerFilter("all")}>All</button>
+                <button style={{...S.brokerFilterBtn,...(brokerFilter==="unassigned"?{...S.brokerFilterActive,borderColor:"#f59e0b",color:"#d97706",background:"#fef3c7"}:{})}} onClick={()=>setBrokerFilter("unassigned")}>Unassigned</button>
+                {brokers.map(b=>(
+                  <button key={b.id} style={{...S.brokerFilterBtn,...(brokerFilter===b.name?{background:brokerColor(brokers,b.name),color:"#fff",borderColor:brokerColor(brokers,b.name)}:{})}} onClick={()=>setBrokerFilter(b.name)}>
+                    {b.name}
+                  </button>
+                ))}
+              </div>
+              <div style={S.ticketList}>
+                {adminPeriodTickets
+                  .filter(t=>brokerFilter==="all"?true:brokerFilter==="unassigned"?!t.broker:t.broker===brokerFilter)
+                  .sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp))
+                  .map(t=>(
+                    <AdminTicketCard key={t.id} ticket={t} brokers={brokers} onClick={()=>setSelectedTicket(t)} />
+                  ))
+                }
+                {adminPeriodTickets.filter(t=>brokerFilter==="all"?true:brokerFilter==="unassigned"?!t.broker:t.broker===brokerFilter).length===0&&(
+                  <div style={S.emptyState}><div style={S.emptyIcon}><ListIcon size={32} color="#94a3b8" /></div><div style={S.emptyText}>No tickets {brokerFilter==="unassigned"?"unassigned":"for this period"}</div></div>
+                )}
+              </div>
             </div>
           )}
 
           {/* EXPORT TAB */}
+
           {adminTab==="export"&&(
             <div style={S.exportStack}>
-              <ExportCard
-                icon="🖼️" title="Ticket Images PDF"
-                desc={`Ticket photos · sorted by driver → date → load · ${adminPeriodTickets.length} tickets`}>
-                <button style={{...S.solidBtn,width:"100%",marginTop:10}}
-                  disabled={exporting==="img"||adminPeriodTickets.length===0}
-                  onClick={()=>{setExporting("img");exportImagePDF(adminPeriodTickets,periodLabel(adminPeriod));setTimeout(()=>setExporting(null),1500);}}>
-                  {exporting==="img"?"Generating…":`🖼️ Export ${adminPeriodTickets.length} Images`}
-                </button>
+              <ExportCard icon={null} title="Auto-Split by Broker" desc="Generates one PDF per broker for the selected period — ready to send to each.">
+                <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}}>
+                  {brokers.length===0&&<div style={{fontSize:13,color:C.muted,textAlign:"center",padding:"8px 0"}}>No brokers added yet — add brokers in the Roster tab.</div>}
+                  {brokers.map(b=>{
+                    const bTickets=adminPeriodTickets.filter(t=>t.broker===b.name);
+                    const bc=brokerColor(brokers,b.name);
+                    return (
+                      <button key={b.id} style={{...S.solidBtn,width:"100%",background:bc,display:"flex",justifyContent:"space-between",alignItems:"center",opacity:bTickets.length===0?.5:1}}
+                        disabled={bTickets.length===0}
+                        onClick={()=>exportImagePDF(bTickets,`${b.name} · ${periodLabel(adminPeriod)}`,b)}>
+                        <span>{b.name}</span>
+                        <span style={{fontSize:13,opacity:.85}}>{bTickets.length} tickets</span>
+                      </button>
+                    );
+                  })}
+                  {adminPeriodTickets.filter(t=>!t.broker).length>0&&(
+                    <div style={{fontSize:12,color:"#d97706",background:"#fef3c7",border:"1px solid #fde68a",borderRadius:8,padding:"8px 12px"}}>
+                      {adminPeriodTickets.filter(t=>!t.broker).length} tickets unassigned — assign brokers before exporting
+                    </div>
+                  )}
+                </div>
               </ExportCard>
-              <ExportCard
-                icon="📊" title="CSV / Spreadsheet"
-                desc="One row per ticket · all fields · opens in Excel for invoicing">
+              <ExportCard icon={null} title="Manual Export" desc="Pick a specific broker and date range.">
+                <ManualExport brokers={brokers} tickets={tickets} brokerColorFn={(n)=>brokerColor(brokers,n)} />
+              </ExportCard>
+              <ExportCard icon={null} title="CSV Export" desc="All ticket data for invoicing — opens in Excel.">
                 <button style={{...S.solidBtn,width:"100%",background:"#16a34a",marginTop:10}}
                   disabled={exporting==="csv"||adminPeriodTickets.length===0}
                   onClick={()=>{setExporting("csv");exportCSV(adminPeriodTickets);setTimeout(()=>setExporting(null),800);}}>
-                  {exporting==="csv"?"Exporting…":`📊 Export CSV (${adminPeriodTickets.length} tickets)`}
+                  {exporting==="csv"?"Exporting…":`Export CSV (${adminPeriodTickets.length} tickets)`}
                 </button>
-              </ExportCard>
-              <ExportCard icon="🔔" title="Push Notifications" desc="Alert inactive drivers · broadcast job assignments · flag notifications" faded>
-                {["⏰ Alert drivers inactive 2+ hours","📋 Broadcast job assignment","⚠️ Notify on flagged ticket"].map(item=>(
-                  <div key={item} style={S.stubRow}><span>{item}</span><span style={{fontSize:11,color:"#94a3b8"}}>Coming soon</span></div>
-                ))}
               </ExportCard>
             </div>
           )}
@@ -838,7 +911,7 @@ export default function App() {
           {adminTab==="roster"&&(
             <div style={S.exportStack}>
               <div style={S.card}>
-                <div style={S.cardTitle}>➕ Add Driver</div>
+                <div style={S.cardTitle}>Add Driver</div>
                 <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
                   <input style={S.fieldInput} placeholder="Driver name" value={newDriverName}
                     onChange={e=>{setNewDriverName(e.target.value);setRosterMsg("");}} />
@@ -850,11 +923,45 @@ export default function App() {
                 </div>
               </div>
               <div style={S.card}>
-                <div style={S.cardTitle}>👥 Drivers ({roster.length})</div>
+                <div style={S.cardTitle}>Drivers ({roster.length})</div>
                 <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
                   {roster.map(d=><RosterRow key={d.name} driver={d} onRemove={handleRemoveDriver} onResetPin={handleResetPin} />)}
                 </div>
               </div>
+
+              {/* Brokers */}
+              <div style={S.card}>
+                <div style={S.cardTitle}>Add Broker</div>
+                <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
+                  <input style={S.fieldInput} placeholder="Company name" value={newBrokerName}
+                    onChange={e=>{setNewBrokerName(e.target.value);setBrokerMsg("");}} />
+                  <input style={S.fieldInput} placeholder="Email address" type="email" value={newBrokerEmail}
+                    onChange={e=>{setNewBrokerEmail(e.target.value);setBrokerMsg("");}} />
+                  <input style={S.fieldInput} placeholder="Billing address" value={newBrokerAddress}
+                    onChange={e=>{setNewBrokerAddress(e.target.value);setBrokerMsg("");}} />
+                  <button style={{...S.solidBtn,width:"100%"}} onClick={handleAddBroker}>Add Broker</button>
+                  {brokerMsg&&<div style={{fontSize:13,color:brokerMsg.startsWith("✓")?"#16a34a":"#dc2626",textAlign:"center"}}>{brokerMsg}</div>}
+                </div>
+              </div>
+              <div style={S.card}>
+                <div style={S.cardTitle}>Brokers ({brokers.length})</div>
+                <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
+                  {brokers.length===0&&<div style={{fontSize:13,color:C.muted,textAlign:"center",padding:"8px 0"}}>No brokers added yet.</div>}
+                  {brokers.map((b,i)=>(
+                    <div key={b.id} style={{...S.rosterRow,borderLeft:`3px solid ${BROKER_COLORS[i%BROKER_COLORS.length]}`}}>
+                      <div style={{display:"flex",alignItems:"center",gap:10}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:14,fontWeight:700,color:C.navy}}>{b.name}</div>
+                          {b.email&&<div style={{fontSize:12,color:C.muted}}>{b.email}</div>}
+                          {b.address&&<div style={{fontSize:12,color:C.muted}}>{b.address}</div>}
+                        </div>
+                        <button style={{...S.rosterAction,color:"#dc2626"}} onClick={()=>handleRemoveBroker(b.id)}>Remove</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <div style={S.card}>
                 <AdminPinChanger currentPin={adminPin} onSave={async(p)=>{
                   setAdminPin(p);
@@ -865,7 +972,7 @@ export default function App() {
             </div>
           )}
         </div>
-        {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)} />}
+        {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)} brokers={brokers} onAssignBroker={assignBroker} brokerColorFn={(n)=>brokerColor(brokers,n)} />}
       </div>
     );
   }
@@ -964,7 +1071,7 @@ function ExportCard({icon,title,desc,children,faded}) {
   return (
     <div style={{...S.card,...(faded?{opacity:.65,border:`1px dashed ${C.border}`}:{})}}>
       <div style={{display:"flex",gap:12,alignItems:"flex-start"}}>
-        <span style={{fontSize:26}}>{icon}</span>
+        {icon&&<span style={{fontSize:26,flexShrink:0}}>{icon}</span>}
         <div>
           <div style={S.cardTitle}>{title}</div>
           <div style={{fontSize:13,color:"#64748b",marginTop:3,lineHeight:1.5}}>{desc}</div>
@@ -996,11 +1103,12 @@ function DriverTicketCard({ticket,onClick}) {
   );
 }
 
-function AdminTicketCard({ticket,onClick}) {
+function AdminTicketCard({ticket,brokers,onClick}) {
   const hasDup = ticket.flags?.some(f=>f.id==="dup");
   const hasNoSig = ticket.flags?.some(f=>f.id==="nosig");
+  const bc = ticket.broker ? brokerColor(brokers,ticket.broker) : null;
   return (
-    <div style={{...S.adminTicketCard,...(ticket.flagged?{borderLeft:`3px solid ${hasDup||hasNoSig?"#dc2626":"#d97706"}`}:{})}} onClick={onClick}>
+    <div style={{...S.adminTicketCard,borderLeft:bc?`4px solid ${bc}`:ticket.flagged?`3px solid ${hasDup||hasNoSig?"#dc2626":"#d97706"}`:`3px solid transparent`}} onClick={onClick}>
       <img src={ticket.image} alt="" style={S.adminTicketThumb} />
       <div style={S.adminTicketInfo}>
         <div style={S.adminTicketTop}>
@@ -1014,22 +1122,28 @@ function AdminTicketCard({ticket,onClick}) {
         </div>
         <div style={S.adminTicketBottom}>
           {ticket.data?.netTons&&<span style={{fontWeight:700,color:C.navy}}>{ticket.data.netTons}t</span>}
-          {ticket.data?.truckNumber&&<span>🚛 {ticket.data.truckNumber}</span>}
-          {ticket.data?.material&&<span>📦 {ticket.data.material}</span>}
+          {ticket.data?.truckNumber&&<span>{ticket.data.truckNumber}</span>}
+          {ticket.data?.material&&<span>{ticket.data.material}</span>}
         </div>
-        {ticket.flags?.length>0&&(
-          <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>
-            {ticket.flags.map(f=><span key={f.id} style={{fontSize:10,color:f.color,background:f.color+"15",padding:"1px 7px",borderRadius:20,fontWeight:600}}>{f.icon} {f.label}</span>)}
-          </div>
-        )}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4,alignItems:"center"}}>
+          {ticket.broker?(
+            <span style={{fontSize:11,fontWeight:700,color:bc,background:bc+"18",border:`1px solid ${bc}40`,borderRadius:20,padding:"2px 8px"}}>{ticket.broker}</span>
+          ):(
+            <span style={{fontSize:11,fontWeight:700,color:"#d97706",background:"#fef3c7",border:"1px solid #fde68a",borderRadius:20,padding:"2px 8px"}}>Unassigned</span>
+          )}
+          {ticket.flags?.map(f=>(
+            <span key={f.id} style={{fontSize:10,color:f.color,background:f.color+"15",padding:"1px 7px",borderRadius:20,fontWeight:600}}>{f.label}</span>
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
-function TicketModal({ticket,onClose}) {
+function TicketModal({ticket,onClose,brokers,onAssignBroker,brokerColorFn}) {
   const gps=ticket.gps;
   const mapsUrl=gps?`https://maps.google.com/?q=${gps.latitude},${gps.longitude}`:null;
+  const bc = ticket.broker&&brokers ? brokerColorFn?.(ticket.broker) : null;
   return (
     <div style={S.modalOverlay} onClick={onClose}>
       <div style={S.modal} onClick={e=>e.stopPropagation()}>
@@ -1040,6 +1154,33 @@ function TicketModal({ticket,onClose}) {
           </div>
           <button style={S.closeBtn} onClick={onClose}>✕</button>
         </div>
+
+        {/* Broker assignment */}
+        {brokers&&onAssignBroker&&(
+          <div style={{padding:"0 16px 12px"}}>
+            <label style={S.fieldLabel}>Broker</label>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}>
+              {brokers.map(b=>{
+                const selected=ticket.broker===b.name;
+                const color=brokerColorFn(b.name);
+                return (
+                  <button key={b.id}
+                    style={{fontSize:12,fontWeight:700,padding:"5px 14px",borderRadius:20,border:`1.5px solid ${color}`,background:selected?color:"transparent",color:selected?"#fff":color,cursor:"pointer"}}
+                    onClick={()=>onAssignBroker(ticket.id,b.name)}>
+                    {b.name}
+                  </button>
+                );
+              })}
+              {ticket.broker&&(
+                <button style={{fontSize:12,fontWeight:600,padding:"5px 14px",borderRadius:20,border:"1.5px solid #e2e8f0",background:"transparent",color:"#94a3b8",cursor:"pointer"}}
+                  onClick={()=>onAssignBroker(ticket.id,null)}>
+                  Clear
+                </button>
+              )}
+            </div>
+            {!ticket.broker&&<div style={{fontSize:12,color:"#d97706",marginTop:6}}>No broker assigned</div>}
+          </div>
+        )}
 
         {ticket.flags?.length>0&&(
           <div style={{padding:"0 16px 8px",display:"flex",flexDirection:"column",gap:4}}>
@@ -1115,6 +1256,44 @@ function RosterRow({driver,onRemove,onResetPin}) {
             onClick={()=>{onResetPin(driver.name,newPin);setEditing(false);setNewPin("");}}>Save</button>
         </div>
       )}
+    </div>
+  );
+}
+
+function ManualExport({brokers, tickets, brokerColorFn}) {
+  const [broker, setBroker] = useState("");
+  const [startDate, setStartDate] = useState(new Date().toISOString().slice(0,10));
+  const [endDate, setEndDate] = useState(new Date().toISOString().slice(0,10));
+  const filtered = tickets.filter(t=>{
+    if (broker && t.broker!==broker) return false;
+    const d=new Date(t.timestamp);
+    return d>=new Date(startDate)&&d<=new Date(endDate+"T23:59:59");
+  });
+  const bc = broker ? brokerColorFn(broker) : C.navy;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
+      <select style={{...S.fieldInput,appearance:"none"}} value={broker} onChange={e=>setBroker(e.target.value)}>
+        <option value="">All brokers</option>
+        {brokers.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+      </select>
+      <div style={{display:"flex",gap:8}}>
+        <div style={{flex:1}}>
+          <label style={S.fieldLabel}>From</label>
+          <input type="date" style={S.fieldInput} value={startDate} onChange={e=>setStartDate(e.target.value)} />
+        </div>
+        <div style={{flex:1}}>
+          <label style={S.fieldLabel}>To</label>
+          <input type="date" style={S.fieldInput} value={endDate} onChange={e=>setEndDate(e.target.value)} />
+        </div>
+      </div>
+      <button style={{...S.solidBtn,width:"100%",background:bc}}
+        disabled={filtered.length===0}
+        onClick={()=>{
+          const brokerObj=brokers.find(b=>b.name===broker)||null;
+          exportImagePDF(filtered,`${broker||"All Brokers"} · ${startDate} to ${endDate}`,brokerObj);
+        }}>
+        Export {filtered.length} Ticket{filtered.length!==1?"s":""}
+      </button>
     </div>
   );
 }
@@ -1280,6 +1459,9 @@ const S = {
   adminTicketMiddle: { display:"flex", gap:8, alignItems:"baseline", marginBottom:3 },
   adminTicketBottom: { display:"flex", gap:8, fontSize:12, color:C.muted, flexWrap:"wrap" },
   // Export / Roster
+  brokerFilterBar: { display:"flex", gap:6, flexWrap:"wrap", padding:"12px 0 4px", overflowX:"auto" },
+  brokerFilterBtn: { fontSize:12, fontWeight:600, padding:"5px 14px", borderRadius:20, border:`1.5px solid ${C.border}`, background:"transparent", color:C.muted, cursor:"pointer", whiteSpace:"nowrap" },
+  brokerFilterActive: { background:C.navy, color:"#fff", borderColor:C.navy },
   exportStack: { display:"flex", flexDirection:"column", gap:12 },
   card: { background:C.surface, border:`1px solid ${C.border}`, borderRadius:12, padding:16, boxShadow:"0 1px 4px rgba(0,0,0,0.04)" },
   cardTitle: { fontSize:15, fontWeight:700, color:C.navy },

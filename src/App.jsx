@@ -928,9 +928,11 @@ export default function App() {
 // ── COMPONENTS ─────────────────────────────────────────────────────────────
 
 function SummaryCard({label,value,highlight,alert}) {
+  const cardStyle = {...S.summaryCard, ...(highlight?{borderColor:C.navy,background:"#eff6ff"}:{}), ...(alert?{borderColor:"#fca5a5",background:"#fef2f2"}:{})};
+  const numStyle = {...S.summaryNum, ...(highlight?{color:C.navy}:{}), ...(alert?{color:"#dc2626"}:{})};
   return (
-    <div style={{...S.summaryCard,...(highlight?{borderColor:C.navy,background:"#eff6ff"}:{}),(alert?{borderColor:"#fca5a5",background:"#fef2f2"}:{})}}>
-      <div style={{...S.summaryNum,...(highlight?{color:C.navy}:{}),(alert?{color:"#dc2626"}:{})}}>{value}</div>
+    <div style={cardStyle}>
+      <div style={numStyle}>{value}</div>
       <div style={S.summaryLabel}>{label}</div>
     </div>
   );

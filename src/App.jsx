@@ -1143,7 +1143,6 @@ function AdminTicketCard({ticket,brokers,onClick}) {
 function TicketModal({ticket,onClose,brokers,onAssignBroker,brokerColorFn}) {
   const gps=ticket.gps;
   const mapsUrl=gps?`https://maps.google.com/?q=${gps.latitude},${gps.longitude}`:null;
-  const bc = ticket.broker&&brokers ? brokerColorFn?.(ticket.broker) : null;
   return (
     <div style={S.modalOverlay} onClick={onClose}>
       <div style={S.modal} onClick={e=>e.stopPropagation()}>

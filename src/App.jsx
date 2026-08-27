@@ -202,7 +202,7 @@ function exportImagePDF(tickets, label) {
     return a.loadNumber-b.loadNumber;
   });
   const pages=sorted.map(t=>{
-    const img=t.trimmedImage||t.image;
+    const img=t.image;
     return `<div class="page">
       <div class="ph">
         <span class="driver">${t.driverName}</span>
@@ -210,7 +210,7 @@ function exportImagePDF(tickets, label) {
         <span class="sup">${t.data?.supplier||""} ${t.data?.ticketNumber?"· #"+t.data.ticketNumber:""}</span>
         <span class="ts">${formatDateShort(t.timestamp)} ${formatTime(t.timestamp)}</span>
       </div>
-      <div class="iw"><img src="${img}" />${t.trimmedImage?'<div class="tb">✂️ Trimmed</div>':''}</div>
+      <div class="iw"><img src="${img}" /></div>
       <div class="pf">Net Tons: <strong>${t.data?.netTons||"—"}</strong> · Truck: <strong>${t.data?.truckNumber||"—"}</strong> · Material: <strong>${t.data?.material||"—"}</strong>${(t.flags||[]).length>0?` · <span style="color:#d97706">⚠️ ${t.flags.map(f=>f.label).join(", ")}</span>`:""}</div>
     </div>`;
   }).join("");
@@ -323,7 +323,7 @@ export default function App() {
       const { data } = await supabase.from("tickets").select("*").order("timestamp",{ascending:false});
       if (data) setTickets(data.map(t=>({
         ...t, driverName:t.driver_name, loadNumber:t.load_number,
-        blurScore:t.blur_score, trimmedImage:t.trimmed_image,
+        blurScore:t.blur_score,
       })));
     } catch {}
   }
@@ -782,7 +782,7 @@ export default function App() {
             <div style={S.exportStack}>
               <ExportCard
                 icon="🖼️" title="Ticket Images PDF"
-                desc={`Trimmed ticket photos · sorted by driver → date → load · ${adminPeriodTickets.length} tickets`}>
+                desc={`Ticket photos · sorted by driver → date → load · ${adminPeriodTickets.length} tickets`}>
                 <button style={{...S.solidBtn,width:"100%",marginTop:10}}
                   disabled={exporting==="img"||adminPeriodTickets.length===0}
                   onClick={()=>{setExporting("img");exportImagePDF(adminPeriodTickets,periodLabel(adminPeriod));setTimeout(()=>setExporting(null),1500);}}>

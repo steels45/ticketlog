@@ -464,7 +464,7 @@ export default function App() {
   if (authState==="splash") return (
     <div style={S.loginWrap}>
       <div style={S.loginCard}>
-        <div style={S.logoMark}>🚛</div>
+        <TruckIcon />
         <h1 style={S.loginTitle}>TicketLog</h1>
         <p style={S.loginSub}>Loading…</p>
       </div>
@@ -475,20 +475,31 @@ export default function App() {
   if (authState==="driver-login") return (
     <div style={S.loginWrap}>
       <div style={S.loginCard}>
-        <div style={S.logoMark}>🚛</div>
+        <TruckIcon />
         <h1 style={S.loginTitle}>TicketLog</h1>
-        <p style={S.loginSub}>Driver Sign In</p>
-        <input style={S.loginInput} placeholder="Your name" value={loginName}
-          onChange={e=>{setLoginName(e.target.value);setLoginError("");}} />
-        <input style={S.loginInput} placeholder="5-digit PIN" type="password"
-          inputMode="numeric" maxLength={5} value={loginPin}
-          onChange={e=>{setLoginPin(e.target.value.replace(/\D/g,""));setLoginError("");}}
-          onKeyDown={e=>e.key==="Enter"&&handleDriverLogin()} />
+        <p style={S.loginSub}>Enter your name and PIN to continue.</p>
+        <div style={S.loginInputWrap}>
+          <PersonIcon />
+          <input style={S.loginInputInner} placeholder="Name" value={loginName}
+            onChange={e=>{setLoginName(e.target.value);setLoginError("");}} />
+        </div>
+        <div style={S.loginInputWrap}>
+          <LockIcon />
+          <input style={S.loginInputInner} placeholder="PIN" type="password"
+            inputMode="numeric" maxLength={5} value={loginPin}
+            onChange={e=>{setLoginPin(e.target.value.replace(/\D/g,""));setLoginError("");}}
+            onKeyDown={e=>e.key==="Enter"&&handleDriverLogin()} />
+          <div style={S.pinDots}>
+            {[0,1,2,3,4].map(i=><span key={i} style={{...S.pinDot,...(i<loginPin.length?S.pinDotFilled:{})}} />)}
+          </div>
+        </div>
         {loginError&&<div style={S.loginError}>{loginError}</div>}
-        <button style={S.loginBtn} onClick={handleDriverLogin}>Sign In →</button>
-        <button style={S.loginGhost} onClick={()=>{setLoginName("");setLoginPin("");setLoginError("");setAuthState("admin-login");}}>
-          Admin Login
+        <button style={S.loginBtn} onClick={handleDriverLogin}>Continue</button>
+        <div style={S.loginDivider}><span style={S.loginDividerText}>or</span></div>
+        <button style={S.loginAdminLink} onClick={()=>{setLoginName("");setLoginPin("");setLoginError("");setAuthState("admin-login");}}>
+          Admin Sign In
         </button>
+        <div style={S.loginVersion}>v1.0.0</div>
       </div>
     </div>
   );
@@ -497,17 +508,21 @@ export default function App() {
   if (authState==="admin-login") return (
     <div style={S.loginWrap}>
       <div style={S.loginCard}>
-        <div style={S.logoMark}>🔐</div>
+        <div style={S.adminLockIcon}><LockIcon size={40} /></div>
         <h1 style={S.loginTitle}>Admin</h1>
-        <p style={S.loginSub}>Authorized Access Only</p>
-        <input style={S.loginInput} placeholder="5-digit Admin PIN" type="password"
-          inputMode="numeric" maxLength={5} value={loginPin}
-          onChange={e=>{setLoginPin(e.target.value.replace(/\D/g,""));setLoginError("");}}
-          onKeyDown={e=>e.key==="Enter"&&handleAdminLogin()} />
+        <p style={S.loginSub}>Authorized access only.</p>
+        <div style={S.loginInputWrap}>
+          <LockIcon />
+          <input style={S.loginInputInner} placeholder="Admin PIN" type="password"
+            inputMode="numeric" maxLength={5} value={loginPin}
+            onChange={e=>{setLoginPin(e.target.value.replace(/\D/g,""));setLoginError("");}}
+            onKeyDown={e=>e.key==="Enter"&&handleAdminLogin()} />
+        </div>
         {loginError&&<div style={S.loginError}>{loginError}</div>}
-        <button style={{...S.loginBtn,background:C.navy}} onClick={handleAdminLogin}>Admin Sign In →</button>
-        <button style={S.loginGhost} onClick={()=>{setLoginPin("");setLoginError("");setAuthState("driver-login");}}>
-          ← Driver Login
+        <button style={S.loginBtn} onClick={handleAdminLogin}>Continue</button>
+        <div style={S.loginDivider}><span style={S.loginDividerText}>or</span></div>
+        <button style={S.loginAdminLink} onClick={()=>{setLoginPin("");setLoginError("");setAuthState("driver-login");}}>
+          Driver Sign In
         </button>
       </div>
     </div>
@@ -516,6 +531,7 @@ export default function App() {
   // ── DRIVER APP ────────────────────────────────────────────────────────────
   if (authState==="driver") {
     const displayImg = previewImg;
+    const driverUnit = roster.find(d=>d.name===driverName)?.unit||null;
     return (
       <div style={S.app}>
         <input ref={fileRef} type="file" accept="image/*" capture="environment"
@@ -524,21 +540,17 @@ export default function App() {
         {/* Header */}
         <div style={S.driverHeader}>
           <div>
-            <div style={S.driverName}>{driverName}</div>
-            <div style={S.driverDate}>{new Date().toLocaleDateString([],{weekday:"long",month:"long",day:"numeric"})}</div>
+            <div style={S.driverName}>Good {getGreeting()}, {driverName.split(" ")[0]}</div>
+            <div style={S.driverDate}>
+              {driverUnit&&<span>Unit {driverUnit} · </span>}
+              {new Date().toLocaleDateString([],{weekday:"long",month:"long",day:"numeric"})}
+            </div>
           </div>
           <button style={S.signOutBtn} onClick={handleLogout}>Sign Out</button>
         </div>
 
-        {/* Tabs */}
-        <div style={S.tabBar}>
-          <button style={{...S.tab,...(driverTab==="capture"?S.tabActive:{})}} onClick={()=>{setDriverTab("capture");resetCapture();}}>
-            📷 Capture
-          </button>
-          <button style={{...S.tab,...(driverTab==="period"?S.tabActive:{})}} onClick={()=>setDriverTab("period")}>
-            📋 My Loads
-          </button>
-        </div>
+        {/* Content area */}
+        <div style={S.driverContent}>
 
         {/* ── CAPTURE TAB ── */}
         {driverTab==="capture" && (
@@ -546,14 +558,17 @@ export default function App() {
             {captureStep==="idle" && (
               <div style={S.captureIdleWrap}>
                 <div style={S.captureIdleCard}>
-                  <div style={S.captureIdleIcon}>📷</div>
+                  <div style={S.captureIconCircle}><CameraIcon size={36} /></div>
                   <div style={S.captureIdleTitle}>Capture Ticket</div>
-                  <div style={S.captureIdleSub}>
-                    This will be your <strong>{ordinal(myTodayTickets.length+1)}</strong> load today
-                  </div>
+                  <div style={S.captureIdleSub}>Next load: <strong>#{myTodayTickets.length+1}</strong></div>
                   <button style={S.captureBigBtn} onClick={()=>fileRef.current.click()}>
-                    Take Photo
+                    <CameraIcon size={20} color="#fff" />
+                    <span>Scan Ticket</span>
                   </button>
+                  <div style={S.captureHint}>
+                    <InfoIcon />
+                    <span>Make sure the ticket is flat, well-lit, and all details are visible.</span>
+                  </div>
                 </div>
                 {myTodayTickets.length>0&&(
                   <div style={S.todaySummary}>
@@ -714,6 +729,19 @@ export default function App() {
         )}
 
         {selectedTicket&&<TicketModal ticket={selectedTicket} onClose={()=>setSelectedTicket(null)} />}
+        </div>
+
+        {/* Bottom tab bar */}
+        <div style={S.bottomTabBar}>
+          <button style={{...S.bottomTab,...(driverTab==="capture"?S.bottomTabActive:{})}} onClick={()=>{setDriverTab("capture");resetCapture();}}>
+            <CameraIcon size={22} color={driverTab==="capture"?C.navy:"#94a3b8"} />
+            <span style={{...S.bottomTabLabel,...(driverTab==="capture"?{color:C.navy,fontWeight:700}:{})}}>Capture</span>
+          </button>
+          <button style={{...S.bottomTab,...(driverTab==="period"?S.bottomTabActive:{})}} onClick={()=>setDriverTab("period")}>
+            <ListIcon size={22} color={driverTab==="period"?C.navy:"#94a3b8"} />
+            <span style={{...S.bottomTabLabel,...(driverTab==="period"?{color:C.navy,fontWeight:700}:{})}}>My Loads</span>
+          </button>
+        </div>
       </div>
     );
   }
@@ -843,6 +871,76 @@ export default function App() {
   }
 
   return null;
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────
+function getGreeting() {
+  const h = new Date().getHours();
+  if (h < 12) return "morning";
+  if (h < 17) return "afternoon";
+  return "evening";
+}
+
+// ── SVG ICONS ─────────────────────────────────────────────────────────────
+function TruckIcon() {
+  return (
+    <svg width="80" height="56" viewBox="0 0 80 56" fill="none" xmlns="http://www.w3.org/2000/svg" style={{marginBottom:8}}>
+      <rect x="4" y="16" width="48" height="28" rx="4" fill="#1e3a5f"/>
+      <path d="M52 24h12l8 10v10H52V24z" fill="#1e3a5f"/>
+      <circle cx="16" cy="46" r="6" fill="#fff" stroke="#1e3a5f" strokeWidth="2"/>
+      <circle cx="40" cy="46" r="6" fill="#fff" stroke="#1e3a5f" strokeWidth="2"/>
+      <circle cx="64" cy="46" r="6" fill="#fff" stroke="#1e3a5f" strokeWidth="2"/>
+      <path d="M8 20 Q12 8 24 8 Q36 8 40 20" stroke="#1e3a5f" strokeWidth="2" fill="none" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+function CameraIcon({size=24, color=C?.navy||"#1e3a5f"}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+      <circle cx="12" cy="13" r="4"/>
+    </svg>
+  );
+}
+
+function ListIcon({size=24, color="#94a3b8"}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/>
+      <rect x="9" y="3" width="6" height="4" rx="1"/>
+      <line x1="9" y1="12" x2="15" y2="12"/>
+      <line x1="9" y1="16" x2="13" y2="16"/>
+    </svg>
+  );
+}
+
+function PersonIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+      <circle cx="12" cy="7" r="4"/>
+    </svg>
+  );
+}
+
+function LockIcon({size=18}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="11" width="18" height="11" rx="2"/>
+      <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="12" y1="16" x2="12" y2="12"/>
+      <line x1="12" y1="8" x2="12.01" y2="8"/>
+    </svg>
+  );
 }
 
 // ── COMPONENTS ─────────────────────────────────────────────────────────────
@@ -1061,35 +1159,49 @@ const C = {
 
 const S = {
   // Login
-  loginWrap: { minHeight:"100vh", background:C.bg, display:"flex", alignItems:"center", justifyContent:"center", padding:24 },
-  loginCard: { background:C.surface, borderRadius:20, padding:"48px 36px", width:"100%", maxWidth:360, textAlign:"center", boxShadow:"0 4px 24px rgba(0,0,0,0.08)", border:`1px solid ${C.border}` },
+  loginWrap: { minHeight:"100vh", background:"#f1f5f9", display:"flex", alignItems:"center", justifyContent:"center", padding:24 },
+  loginCard: { background:C.surface, borderRadius:24, padding:"48px 32px 36px", width:"100%", maxWidth:380, textAlign:"center", boxShadow:"0 4px 32px rgba(0,0,0,0.08)" },
   logoMark: { fontSize:48, marginBottom:12 },
-  loginTitle: { fontSize:28, fontWeight:800, color:C.navy, margin:"0 0 4px", fontFamily:"system-ui" },
-  loginSub: { color:C.muted, fontSize:13, marginBottom:28, letterSpacing:"0.02em" },
-  loginInput: { width:"100%", padding:"13px 16px", borderRadius:10, border:`1.5px solid ${C.border}`, background:C.bg, color:C.text, fontSize:15, outline:"none", boxSizing:"border-box", marginBottom:10, transition:"border-color .15s" },
-  loginBtn: { width:"100%", padding:"14px", borderRadius:10, border:"none", background:C.gold, color:"#fff", fontWeight:700, fontSize:15, cursor:"pointer", marginBottom:8 },
-  loginGhost: { width:"100%", padding:"12px", borderRadius:10, border:`1.5px solid ${C.border}`, background:"transparent", color:C.muted, fontWeight:600, fontSize:13, cursor:"pointer" },
+  adminLockIcon: { display:"flex", justifyContent:"center", marginBottom:12 },
+  loginTitle: { fontSize:32, fontWeight:800, color:C.navy, margin:"0 0 6px", letterSpacing:"-0.5px" },
+  loginSub: { color:C.muted, fontSize:14, marginBottom:28, lineHeight:1.5 },
+  loginInputWrap: { display:"flex", alignItems:"center", gap:10, background:"#f8fafc", border:`1.5px solid ${C.border}`, borderRadius:14, padding:"13px 16px", marginBottom:12 },
+  loginInputInner: { flex:1, border:"none", background:"transparent", color:C.text, fontSize:16, outline:"none" },
+  pinDots: { display:"flex", gap:5, alignItems:"center" },
+  pinDot: { width:8, height:8, borderRadius:"50%", background:C.border },
+  pinDotFilled: { background:C.navy },
   loginError: { color:"#dc2626", fontSize:13, textAlign:"center", marginBottom:8 },
+  loginBtn: { width:"100%", padding:"15px", borderRadius:14, border:"none", background:C.navy, color:"#fff", fontWeight:700, fontSize:16, cursor:"pointer", marginBottom:16, marginTop:4 },
+  loginGhost: { width:"100%", padding:"12px", borderRadius:12, border:`1.5px solid ${C.border}`, background:"transparent", color:C.muted, fontWeight:600, fontSize:14, cursor:"pointer" },
+  loginDivider: { display:"flex", alignItems:"center", gap:12, margin:"4px 0 12px" },
+  loginDividerText: { color:C.dim, fontSize:13 },
+  loginAdminLink: { background:"none", border:"none", color:C.navy, fontWeight:600, fontSize:15, cursor:"pointer", padding:"4px 0" },
+  loginVersion: { fontSize:12, color:C.dim, marginTop:20 },
   // App shell
-  app: { minHeight:"100vh", background:C.bg, fontFamily:"-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", paddingBottom:40 },
+  app: { height:"100vh", background:C.bg, fontFamily:"-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", display:"flex", flexDirection:"column", overflow:"hidden" },
   adminApp: { minHeight:"100vh", background:C.bg, fontFamily:"-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", paddingBottom:40 },
   // Driver header
-  driverHeader: { background:C.surface, borderBottom:`1px solid ${C.border}`, padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", boxShadow:"0 1px 4px rgba(0,0,0,0.04)" },
-  driverName: { fontSize:18, fontWeight:800, color:C.navy },
+  driverHeader: { background:C.surface, borderBottom:`1px solid ${C.border}`, padding:"14px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 },
+  driverName: { fontSize:18, fontWeight:700, color:C.navy },
   driverDate: { fontSize:12, color:C.muted, marginTop:2 },
-  signOutBtn: { fontSize:12, fontWeight:600, color:"#dc2626", background:"#fef2f2", border:"1px solid #fca5a5", borderRadius:8, padding:"6px 12px", cursor:"pointer" },
-  // Tabs
-  tabBar: { display:"flex", background:C.surface, borderBottom:`1px solid ${C.border}`, padding:"0 20px" },
-  tab: { flex:1, padding:"13px 0", fontSize:14, fontWeight:600, color:C.muted, background:"none", border:"none", borderBottom:"2px solid transparent", cursor:"pointer" },
-  tabActive: { color:C.navy, borderBottomColor:C.navy },
+  signOutBtn: { fontSize:12, fontWeight:500, color:C.muted, background:"none", border:"none", cursor:"pointer", padding:"4px 0" },
+  // Content area
+  driverContent: { flex:1, overflowY:"auto", paddingBottom:0 },
+  // Bottom tab bar
+  bottomTabBar: { display:"flex", background:C.surface, borderTop:`1px solid ${C.border}`, flexShrink:0, paddingBottom:"env(safe-area-inset-bottom,0px)" },
+  bottomTab: { flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"10px 0 8px", background:"none", border:"none", cursor:"pointer", gap:4 },
+  bottomTabActive: {},
+  bottomTabLabel: { fontSize:11, color:"#94a3b8", fontWeight:500 },
   // Capture
   captureWrap: { padding:20 },
   captureIdleWrap: { display:"flex", flexDirection:"column", gap:12 },
-  captureIdleCard: { background:C.surface, borderRadius:16, padding:"32px 24px", textAlign:"center", border:`1px solid ${C.border}`, boxShadow:"0 2px 8px rgba(0,0,0,0.04)" },
+  captureIdleCard: { background:C.surface, borderRadius:20, padding:"36px 24px 28px", textAlign:"center" },
+  captureIconCircle: { width:80, height:80, borderRadius:"50%", background:"#f1f5f9", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 20px" },
   captureIdleIcon: { fontSize:48, marginBottom:12 },
-  captureIdleTitle: { fontSize:22, fontWeight:800, color:C.navy, marginBottom:6 },
+  captureIdleTitle: { fontSize:24, fontWeight:800, color:C.navy, marginBottom:6 },
   captureIdleSub: { fontSize:14, color:C.muted, marginBottom:24 },
-  captureBigBtn: { width:"100%", padding:"16px", borderRadius:12, border:"none", background:C.navy, color:"#fff", fontWeight:700, fontSize:17, cursor:"pointer" },
+  captureBigBtn: { width:"100%", padding:"16px", borderRadius:14, border:"none", background:C.navy, color:"#fff", fontWeight:700, fontSize:17, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:10 },
+  captureHint: { display:"flex", alignItems:"center", gap:8, background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:10, padding:"10px 14px", marginTop:16, textAlign:"left" },
   todaySummary: { background:C.surface, borderRadius:12, padding:"12px 16px", display:"flex", justifyContent:"space-between", alignItems:"center", border:`1px solid ${C.border}` },
   todaySummaryLabel: { fontSize:13, fontWeight:600, color:C.muted },
   todaySummaryVal: { fontSize:13, fontWeight:700, color:C.navy },
@@ -1142,7 +1254,7 @@ const S = {
   driverTicketTons: { fontSize:20, fontWeight:800, color:C.navy, fontFamily:"monospace", marginBottom:4 },
   driverTicketMeta: { display:"flex", gap:8, fontSize:12, color:C.muted, flexWrap:"wrap" },
   driverTicketTime: { fontSize:11, color:C.dim, marginTop:4 },
-  loadPill: { fontSize:11, fontWeight:700, color:C.gold, background:"#fff8ed", border:"1px solid #f0a50040", borderRadius:20, padding:"2px 8px" },
+  loadPill: { fontSize:11, fontWeight:700, color:C.navy, background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:20, padding:"2px 8px" },
   supplierText: { fontSize:12, color:C.muted, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
   // Admin
   adminHeader: { background:C.navy, color:"#fff", padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between" },

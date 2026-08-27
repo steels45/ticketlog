@@ -43,42 +43,6 @@ function periodLabel(period) {
 }
 
 // ── BACKGROUND TRIM ───────────────────────────────────────────────────────
-async function trimBackground(dataUrl) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const MAX = 1800;
-      const scale = Math.min(1, MAX / Math.max(img.width, img.height));
-      const w = Math.round(img.width * scale);
-      const h = Math.round(img.height * scale);
-      const canvas = document.createElement("canvas");
-      canvas.width = w; canvas.height = h;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0, w, h);
-      const { data } = ctx.getImageData(0, 0, w, h);
-      const sampleCorner = (x, y) => { const i=(y*w+x)*4; return [data[i],data[i+1],data[i+2]]; };
-      const corners = [sampleCorner(5,5),sampleCorner(w-5,5),sampleCorner(5,h-5),sampleCorner(w-5,h-5)];
-      const bgColor = corners.reduce((a,c)=>[a[0]+c[0],a[1]+c[1],a[2]+c[2]],[0,0,0]).map(v=>v/4);
-      const colorDiff = (r,g,b) => Math.abs(r-bgColor[0])+Math.abs(g-bgColor[1])+Math.abs(b-bgColor[2]);
-      let minX=w,maxX=0,minY=h,maxY=0;
-      for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
-        const i=(y*w+x)*4;
-        if (colorDiff(data[i],data[i+1],data[i+2])>40) {
-          if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y;
-        }
-      }
-      const bw=maxX-minX, bh=maxY-minY;
-      if (bw<w*0.2||bh<h*0.2) { resolve({croppedUrl:dataUrl,success:false}); return; }
-      const pad=20, cx=Math.max(0,minX-pad), cy=Math.max(0,minY-pad);
-      const cw=Math.min(w-cx,bw+pad*2), ch=Math.min(h-cy,bh+pad*2);
-      const crop=document.createElement("canvas"); crop.width=cw; crop.height=ch;
-      crop.getContext("2d").drawImage(canvas,cx,cy,cw,ch,0,0,cw,ch);
-      resolve({croppedUrl:crop.toDataURL("image/jpeg",0.92),success:true});
-    };
-    img.onerror=()=>resolve({croppedUrl:dataUrl,success:false});
-    img.src=dataUrl;
-  });
-}
 
 // ── BLUR DETECTION ────────────────────────────────────────────────────────
 function measureBlur(dataUrl) {
@@ -321,10 +285,6 @@ export default function App() {
   // Capture flow
   const [captureStep, setCaptureStep] = useState("idle"); // idle | preview | review
   const [previewImg, setPreviewImg] = useState(null);
-  const [trimmedImg, setTrimmedImg] = useState(null);
-  const [trimSuccess, setTrimSuccess] = useState(null);
-  const [trimWarningDismissed, setTrimWarningDismissed] = useState(false);
-  const [showTrimmed, setShowTrimmed] = useState(false);
   const [blurScore, setBlurScore] = useState(null);
   const [blurWarning, setBlurWarning] = useState(false);
   const [gpsData, setGpsData] = useState(null);
@@ -425,8 +385,6 @@ export default function App() {
   // ── CAPTURE ───────────────────────────────────────────────────────────────
   function resetCapture() {
     setCaptureStep("idle");
-    setPreviewImg(null); setTrimmedImg(null); setTrimSuccess(null);
-    setTrimWarningDismissed(false); setShowTrimmed(false);
     setBlurScore(null); setBlurWarning(false);
     setGpsData(null); setGpsStatus("idle");
     setEditData({}); setDuplicateWarning(null); setLoadError(null);
@@ -435,17 +393,14 @@ export default function App() {
   async function handleFileSelect(e) {
     const file = e.target.files[0];
     if (!file) return;
-    setGpsStatus("fetching"); setTrimSuccess(null); setBlurScore(null); setShowTrimmed(false);
     const gpsPromise = getGPSLocation();
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const dataUrl = ev.target.result;
       setPreviewImg(dataUrl);
       setCaptureStep("preview");
-      const [coords, blur, trimResult] = await Promise.all([gpsPromise, measureBlur(dataUrl), trimBackground(dataUrl)]);
+      const [coords, blur] = await Promise.all([gpsPromise, measureBlur(dataUrl)]);
       setBlurScore(blur); setBlurWarning(blur<80);
-      setTrimmedImg(trimResult.croppedUrl); setTrimSuccess(trimResult.success);
-      if (trimResult.success) setShowTrimmed(true);
       if (coords) { setGpsData(coords); setGpsStatus("ok"); } else setGpsStatus("failed");
     };
     reader.readAsDataURL(file);
@@ -454,7 +409,7 @@ export default function App() {
   async function handleAnalyze() {
     setLoading(true); setLoadError(null); setDuplicateWarning(null);
     try {
-      const imgToUse = (trimSuccess && showTrimmed) ? trimmedImg : previewImg;
+      const imgToUse = previewImg;
       const base64 = imgToUse.split(",")[1];
       const data = await extractTicketData(base64);
       setEditData(data);
@@ -473,20 +428,19 @@ export default function App() {
     const myLoads = tickets.filter(t=>t.driverName===driverName&&new Date(t.timestamp).toDateString()===today);
     const tempTicket={id:"temp",data:editData,blurScore};
     const flags=buildFlags(tempTicket,tickets);
-    const imgToSave=(trimSuccess&&showTrimmed)?trimmedImg:previewImg;
+    const imgToSave=previewImg;
     const ticket={
       id:`ticket:${driverName}-${Date.now()}`,
       driverName, loadNumber:myLoads.length+1,
       timestamp:new Date().toISOString(),
       image:imgToSave,
-      trimmedImage:trimSuccess?trimmedImg:null,
       data:editData, gps:gpsData||null,
       blurScore, flags, flagged:flags.length>0,
     };
     try {
       const {error}=await supabase.from("tickets").insert({
         id:ticket.id, driver_name:ticket.driverName, load_number:ticket.loadNumber,
-        timestamp:ticket.timestamp, image:ticket.image, trimmed_image:ticket.trimmedImage,
+        timestamp:ticket.timestamp, image:ticket.image, 
         data:ticket.data, gps:ticket.gps, blur_score:ticket.blurScore,
         flags:ticket.flags, flagged:ticket.flagged,
       });
@@ -561,7 +515,7 @@ export default function App() {
 
   // ── DRIVER APP ────────────────────────────────────────────────────────────
   if (authState==="driver") {
-    const displayImg = showTrimmed && trimSuccess ? trimmedImg : previewImg;
+    const displayImg = previewImg;
     return (
       <div style={S.app}>
         <input ref={fileRef} type="file" accept="image/*" capture="environment"
@@ -615,13 +569,7 @@ export default function App() {
                 {/* Image preview */}
                 <div style={S.imgPreviewWrap}>
                   <img src={displayImg||previewImg} alt="ticket" style={S.imgPreview} />
-                  {trimSuccess&&(
-                    <div style={S.trimToggle}>
-                      <button style={{...S.trimBtn,...(!showTrimmed?S.trimBtnActive:{})}} onClick={()=>setShowTrimmed(false)}>Original</button>
-                      <button style={{...S.trimBtn,...(showTrimmed?S.trimBtnActive:{})}} onClick={()=>setShowTrimmed(true)}>Trimmed ✂️</button>
-                    </div>
-                  )}
-                </div>
+</div>
 
                 {/* Status cards */}
                 <div style={S.statusStack}>
@@ -633,130 +581,7 @@ export default function App() {
                         {blurWarning?"Blurry — consider retaking":"Image looks sharp"}
                       </span>
                     </div>
-                  )}
-                  {/* Trim */}
-                  {trimSuccess===true&&(
-                    <div style={{...S.statusChip,borderColor:"#86efac",background:"#f0fdf4"}}>
-                      <span>✂️</span>
-                      <span style={{fontSize:13,color:"#16a34a",fontWeight:600}}>Background trimmed successfully</span>
-                    </div>
-                  )}
-                  {trimSuccess===false&&!trimWarningDismissed&&(
-                    <div style={{...S.statusChip,borderColor:"#fca5a5",background:"#fef2f2",flexDirection:"column",alignItems:"flex-start",gap:8}}>
-                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                        <span>⚠️</span>
-                        <span style={{fontSize:13,color:"#dc2626",fontWeight:600}}>Couldn't trim — retake for best results</span>
-                      </div>
-                      <div style={{display:"flex",gap:8,width:"100%"}}>
-                        <button style={{...S.solidBtn,flex:1,fontSize:13}} onClick={()=>{resetCapture();setTimeout(()=>fileRef.current?.click(),100);}}>Retake</button>
-                        <button style={{...S.outlineBtn,flex:1,fontSize:13}} onClick={()=>setTrimWarningDismissed(true)}>Use Full Image</button>
-                      </div>
-                    </div>
-                  )}
-                  {/* GPS */}
-                  <div style={{...S.statusChip,borderColor:gpsStatus==="ok"?"#86efac":gpsStatus==="failed"?"#fca5a5":"#e2e8f0",background:gpsStatus==="ok"?"#f0fdf4":"#f8fafc"}}>
-                    <span style={{fontSize:10,color:gpsStatus==="ok"?"#16a34a":gpsStatus==="failed"?"#dc2626":"#94a3b8"}}>●</span>
-                    <span style={{fontSize:13,color:gpsStatus==="ok"?"#16a34a":gpsStatus==="failed"?"#dc2626":"#64748b"}}>
-                      {gpsStatus==="fetching"?"Acquiring GPS…":gpsStatus==="ok"?`GPS locked · ±${gpsData?.accuracy}m`:"GPS unavailable"}
-                    </span>
-                  </div>
-                </div>
-
-                {loadError&&<div style={S.errorBox}>{loadError}</div>}
-
-                <div style={S.actionRow}>
-                  {blurWarning?(
-                    <>
-                      <button style={S.solidBtn} onClick={()=>{resetCapture();setTimeout(()=>fileRef.current?.click(),100);}}>📷 Retake</button>
-                      <button style={{...S.outlineBtn}} onClick={handleAnalyze} disabled={loading}>{loading?"Analyzing…":"Use Anyway"}</button>
-                    </>
-                  ):(
-                    <button style={{...S.solidBtn,width:"100%"}} onClick={handleAnalyze} disabled={loading}>
-                      {loading?"Analyzing ticket…":"✦ Extract Ticket Data"}
-                    </button>
-                  )}
-                </div>
-                <button style={S.ghostLink} onClick={resetCapture}>Cancel</button>
-              </div>
-            )}
-
-            {captureStep==="review" && (
-              <div style={S.captureStepWrap}>
-                {/* Ticket header */}
-                <div style={S.reviewHeader}>
-                  <img src={displayImg||previewImg} alt="" style={S.reviewThumb} />
-                  <div style={S.reviewHeaderInfo}>
-                    {editData.supplier&&<div style={S.reviewSupplier}>{editData.supplier}</div>}
-                    {editData.ticketNumber&&<div style={S.reviewTicketNum}>#{editData.ticketNumber}</div>}
-                    {editData.netTons&&(
-                      <div style={S.netTonsBadge}>
-                        <span style={S.netTonsNum}>{editData.netTons}</span>
-                        <span style={S.netTonsLabel}>NET TONS</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Duplicate warning */}
-                {duplicateWarning&&(
-                  <div style={S.dupWarning}>
-                    <div style={S.dupWarningTitle}>⚠️ Duplicate Ticket #{duplicateWarning.ticketNumber}</div>
-                    <div style={S.dupWarningText}>Already submitted by <strong>{duplicateWarning.submittedBy}</strong> at {formatTime(duplicateWarning.submittedAt)}. Verify before saving.</div>
-                  </div>
-                )}
-
-                {/* No sig warning */}
-                {editData.signaturePresent===false&&editData.stampPresent===false&&(
-                  <div style={{...S.warnChip,borderColor:"#fca5a5",background:"#fef2f2"}}>
-                    <span>✍️</span>
-                    <span style={{fontSize:13,color:"#dc2626",fontWeight:600}}>No signature or stamp detected — ticket will be flagged</span>
-                  </div>
-                )}
-
-                {/* Fields */}
-                <div style={S.fieldsGrid}>
-                  {Object.entries(FIELD_LABELS).filter(([k])=>k!=="signaturePresent"&&k!=="stampPresent").map(([key,label])=>(
-                    <div key={key} style={key==="notes"||key==="location"||key==="customer"?{...S.fieldWrap,gridColumn:"span 2"}:S.fieldWrap}>
-                      <label style={S.fieldLabel}>{label}</label>
-                      <input style={S.fieldInput} value={editData[key]||""}
-                        onChange={e=>setEditData(p=>({...p,[key]:e.target.value}))} placeholder="—" />
-                    </div>
-                  ))}
-                </div>
-
-                {loadError&&<div style={S.errorBox}>{loadError}</div>}
-
-                {duplicateWarning?(
-                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                    <button style={{...S.solidBtn,width:"100%",background:"#dc2626"}} onClick={()=>handleSave(true)} disabled={saving}>
-                      {saving?"Saving…":"Save Anyway (Override Duplicate)"}
-                    </button>
-                    <button style={{...S.outlineBtn,width:"100%"}} onClick={resetCapture}>Discard</button>
-                  </div>
-                ):(
-                  <>
-                    <button style={{...S.solidBtn,width:"100%"}} onClick={()=>handleSave(false)} disabled={saving}>
-                      {saving?"Saving…":"✓ Save Ticket"}
-                    </button>
-                    <button style={S.ghostLink} onClick={resetCapture}>Discard</button>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── MY LOADS TAB ── */}
-        {driverTab==="period" && (
-          <div style={S.periodWrap}>
-            {/* Period navigation */}
-            <div style={S.periodNav}>
-              <button style={S.periodNavBtn} onClick={()=>setPeriodOffset(p=>p-1)}>‹</button>
-              <div style={S.periodNavCenter}>
-                <div style={S.periodNavLabel}>{periodOffset===0?"This Week":periodOffset===-1?"Last Week":`${Math.abs(periodOffset)} weeks ago`}</div>
-                <div style={S.periodNavDates}>{periodLabel(currentPeriod)}</div>
-              </div>
-              <button style={{...S.periodNavBtn,...(periodOffset===0?{opacity:.3,pointerEvents:"none"}:{})}} onClick={()=>setPeriodOffset(p=>p+1)}>›</button>
+                  )}} onClick={()=>setPeriodOffset(p=>p+1)}>›</button>
             </div>
 
             {/* Period summary */}
@@ -960,7 +785,7 @@ function ExportCard({icon,title,desc,children,faded}) {
 function DriverTicketCard({ticket,onClick}) {
   return (
     <div style={S.driverTicketCard} onClick={onClick}>
-      <img src={ticket.trimmedImage||ticket.image} alt="" style={S.driverTicketThumb} />
+      <img src={ticket.image} alt="" style={S.driverTicketThumb} />
       <div style={S.driverTicketInfo}>
         <div style={S.driverTicketTop}>
           <span style={S.loadPill}>{ordinal(ticket.loadNumber)}</span>
@@ -983,7 +808,7 @@ function AdminTicketCard({ticket,onClick}) {
   const hasNoSig = ticket.flags?.some(f=>f.id==="nosig");
   return (
     <div style={{...S.adminTicketCard,...(ticket.flagged?{borderLeft:`3px solid ${hasDup||hasNoSig?"#dc2626":"#d97706"}`}:{})}} onClick={onClick}>
-      <img src={ticket.trimmedImage||ticket.image} alt="" style={S.adminTicketThumb} />
+      <img src={ticket.image} alt="" style={S.adminTicketThumb} />
       <div style={S.adminTicketInfo}>
         <div style={S.adminTicketTop}>
           <span style={S.adminDriverName}>{ticket.driverName}</span>
@@ -1033,7 +858,7 @@ function TicketModal({ticket,onClose}) {
           </div>
         )}
 
-        <img src={ticket.trimmedImage||ticket.image} alt="ticket" style={S.modalImg} />
+        <img src={ticket.image} alt="ticket" style={S.modalImg} />
 
         {ticket.data?.netTons&&(
           <div style={S.modalTons}>
@@ -1176,9 +1001,6 @@ const S = {
   captureStepWrap: { display:"flex", flexDirection:"column", gap:12 },
   imgPreviewWrap: { position:"relative", background:"#000", borderRadius:14, overflow:"hidden" },
   imgPreview: { width:"100%", maxHeight:320, objectFit:"contain", display:"block" },
-  trimToggle: { position:"absolute", bottom:10, left:"50%", transform:"translateX(-50%)", display:"flex", background:"rgba(0,0,0,0.6)", borderRadius:20, padding:3, gap:2 },
-  trimBtn: { fontSize:12, fontWeight:600, padding:"4px 14px", borderRadius:17, border:"none", background:"transparent", color:"rgba(255,255,255,.7)", cursor:"pointer" },
-  trimBtnActive: { background:"#fff", color:"#1e293b" },
   statusStack: { display:"flex", flexDirection:"column", gap:8 },
   statusChip: { display:"flex", alignItems:"center", gap:8, padding:"10px 14px", borderRadius:10, border:"1px solid", background:C.bg },
   warnChip: { display:"flex", alignItems:"center", gap:8, padding:"10px 14px", borderRadius:10, border:"1px solid" },

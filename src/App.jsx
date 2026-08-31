@@ -42,6 +42,345 @@ function periodLabel(period) {
   return `${period.start.toLocaleDateString([],{month:"short",day:"numeric"})} – ${period.end.toLocaleDateString([],{month:"short",day:"numeric",year:"numeric"})}`;
 }
 
+// ── SCANNER CONSTANTS ─────────────────────────────────────────────────────
+const SCAN_FPS = 12;
+const STABILITY_MS = 600;
+const MIN_AREA_RATIO = 0.15;
+const MAX_LONG_EDGE = 2000;
+const JPEG_QUALITY = 0.85;
+
+// ── LIVE DOCUMENT SCANNER ─────────────────────────────────────────────────
+function LiveDocumentScanner({ onCapture, onClose }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const overlayRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const stableRef = useRef({ corners: null, since: null });
+  const [cvLoaded, setCvLoaded] = useState(window.cvReady);
+  const [status, setStatus] = useState("Initializing camera…");
+  const [detected, setDetected] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Wait for OpenCV
+  useEffect(() => {
+    if (window.cvReady) { setCvLoaded(true); return; }
+    const cb = () => setCvLoaded(true);
+    window.cvReadyCallbacks.push(cb);
+    return () => { window.cvReadyCallbacks = window.cvReadyCallbacks.filter(f => f !== cb); };
+  }, []);
+
+  // Start camera stream
+  useEffect(() => {
+    let cancelled = false;
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+          setStatus("Point camera at ticket");
+        }
+      } catch (err) {
+        if (!cancelled) setError("Camera access denied. Use the manual option below.");
+      }
+    }
+    startCamera();
+    return () => {
+      cancelled = true;
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
+  // Detection loop
+  useEffect(() => {
+    if (!cvLoaded || !videoRef.current) return;
+    const cv = window.cv;
+    const INTERVAL = 1000 / SCAN_FPS;
+    let lastRun = 0;
+
+    function detect(now) {
+      rafRef.current = requestAnimationFrame(detect);
+      if (now - lastRun < INTERVAL) return;
+      lastRun = now;
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || video.readyState < 2) return;
+
+      // Downsample for detection
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return;
+      const scale = 480 / vw;
+      const dw = 480, dh = Math.round(vh * scale);
+      canvas.width = dw; canvas.height = dh;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, dw, dh);
+
+      let corners = null;
+      try {
+        const src = cv.imread(canvas);
+        const gray = new cv.Mat();
+        const blur = new cv.Mat();
+        const edges = new cv.Mat();
+        const dilated = new cv.Mat();
+        const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+        const contours = new cv.MatVector();
+        const hierarchy = new cv.Mat();
+
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+        cv.Canny(blur, edges, 50, 150);
+        cv.dilate(edges, dilated, kernel);
+        cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+        let maxArea = 0, best = null;
+        const minArea = dw * dh * MIN_AREA_RATIO;
+        for (let i = 0; i < contours.size(); i++) {
+          const cnt = contours.get(i);
+          const area = cv.contourArea(cnt);
+          if (area < minArea) { cnt.delete(); continue; }
+          const peri = cv.arcLength(cnt, true);
+          const approx = new cv.Mat();
+          cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+          if (approx.rows === 4 && area > maxArea) {
+            maxArea = area;
+            best = Array.from({ length: 4 }, (_, j) => ({
+              x: approx.data32S[j * 2] / scale,
+              y: approx.data32S[j * 2 + 1] / scale,
+            }));
+          }
+          approx.delete(); cnt.delete();
+        }
+        corners = best;
+        src.delete(); gray.delete(); blur.delete(); edges.delete();
+        dilated.delete(); kernel.delete(); contours.delete(); hierarchy.delete();
+      } catch {}
+
+      // Update overlay
+      updateOverlay(corners, vw, vh);
+
+      // Stability check
+      if (corners) {
+        const s = stableRef.current;
+        const same = s.corners && corners.every((c, i) =>
+          Math.abs(c.x - s.corners[i].x) < 12 && Math.abs(c.y - s.corners[i].y) < 12
+        );
+        if (same) {
+          if (Date.now() - s.since >= STABILITY_MS) {
+            stableRef.current = { corners: null, since: null };
+            doCapture(corners, video);
+          }
+        } else {
+          stableRef.current = { corners, since: Date.now() };
+        }
+        setDetected(true);
+        setStatus("Hold steady…");
+      } else {
+        stableRef.current = { corners: null, since: null };
+        setDetected(false);
+        setStatus("Point camera at ticket");
+      }
+    }
+
+    rafRef.current = requestAnimationFrame(detect);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [cvLoaded]);
+
+  function updateOverlay(corners, vw, vh) {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    if (!corners) {
+      overlay.innerHTML = "";
+      return;
+    }
+    const rect = overlay.getBoundingClientRect();
+    const sx = rect.width / vw, sy = rect.height / vh;
+    const pts = corners.map(c => `${c.x * sx},${c.y * sy}`).join(" ");
+    overlay.innerHTML = `
+      <polygon points="${pts}" fill="rgba(30,58,95,0.15)" stroke="#1e3a5f" stroke-width="3" stroke-dasharray="8,4"/>
+      ${corners.map(c => `<circle cx="${c.x * sx}" cy="${c.y * sy}" r="8" fill="#1e3a5f"/>`).join("")}
+    `;
+  }
+
+  async function doCapture(corners, video) {
+    if (capturing) return;
+    setCapturing(true);
+    setStatus("Capturing…");
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+    try {
+      const cv = window.cv;
+      const vw = video.videoWidth, vh = video.videoHeight;
+
+      // Order corners: top-left, top-right, bottom-right, bottom-left
+      const ordered = orderCorners(corners);
+
+      // Compute output size from longest edges
+      const w1 = dist(ordered[0], ordered[1]), w2 = dist(ordered[3], ordered[2]);
+      const h1 = dist(ordered[0], ordered[3]), h2 = dist(ordered[1], ordered[2]);
+      let outW = Math.round(Math.max(w1, w2));
+      let outH = Math.round(Math.max(h1, h2));
+      const longEdge = Math.max(outW, outH);
+      if (longEdge > MAX_LONG_EDGE) {
+        const s = MAX_LONG_EDGE / longEdge;
+        outW = Math.round(outW * s); outH = Math.round(outH * s);
+      }
+
+      // Full-res capture
+      const fullCanvas = document.createElement("canvas");
+      fullCanvas.width = vw; fullCanvas.height = vh;
+      fullCanvas.getContext("2d").drawImage(video, 0, 0, vw, vh);
+      const src = cv.imread(fullCanvas);
+      const dst = new cv.Mat();
+      const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        ordered[0].x, ordered[0].y,
+        ordered[1].x, ordered[1].y,
+        ordered[2].x, ordered[2].y,
+        ordered[3].x, ordered[3].y,
+      ]);
+      const dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        0, 0, outW, 0, outW, outH, 0, outH,
+      ]);
+      const M = cv.getPerspectiveTransform(srcPts, dstPts);
+      cv.warpPerspective(src, dst, M, new cv.Size(outW, outH));
+
+      const outCanvas = document.createElement("canvas");
+      outCanvas.width = outW; outCanvas.height = outH;
+      cv.imshow(outCanvas, dst);
+      src.delete(); dst.delete(); srcPts.delete(); dstPts.delete(); M.delete();
+
+      const dataUrl = outCanvas.toDataURL("image/jpeg", JPEG_QUALITY);
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      onCapture(dataUrl);
+    } catch (err) {
+      // Fallback: capture full frame without warp
+      const fallback = document.createElement("canvas");
+      fallback.width = video.videoWidth; fallback.height = video.videoHeight;
+      fallback.getContext("2d").drawImage(video, 0, 0);
+      const dataUrl = fallback.toDataURL("image/jpeg", JPEG_QUALITY);
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      onCapture(dataUrl);
+    }
+  }
+
+  function manualCapture() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    setCapturing(true);
+    const corners = stableRef.current.corners;
+    if (corners && window.cvReady) {
+      doCapture(corners, video);
+    } else {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      onCapture(dataUrl);
+    }
+  }
+
+  function orderCorners(pts) {
+    const center = { x: pts.reduce((s,p)=>s+p.x,0)/4, y: pts.reduce((s,p)=>s+p.y,0)/4 };
+    const tl = pts.filter(p=>p.x<=center.x&&p.y<=center.y)[0]||pts[0];
+    const tr = pts.filter(p=>p.x>center.x&&p.y<=center.y)[0]||pts[1];
+    const br = pts.filter(p=>p.x>center.x&&p.y>center.y)[0]||pts[2];
+    const bl = pts.filter(p=>p.x<=center.x&&p.y>center.y)[0]||pts[3];
+    return [tl,tr,br,bl];
+  }
+
+  function dist(a, b) {
+    return Math.sqrt((b.x-a.x)**2+(b.y-a.y)**2);
+  }
+
+  return (
+    <div style={SS.scannerWrap}>
+      {/* Video feed */}
+      <video ref={videoRef} style={SS.video} playsInline muted autoPlay />
+
+      {/* Detection overlay */}
+      <svg ref={overlayRef} style={SS.overlay} />
+
+      {/* Corner guide when no detection */}
+      {!detected && !capturing && (
+        <div style={SS.guideFrame}>
+          <div style={{...SS.guideCorner,...SS.guideCornerTL}}/>
+          <div style={{...SS.guideCorner,...SS.guideCornerTR}}/>
+          <div style={{...SS.guideCorner,...SS.guideCornerBL}}/>
+          <div style={{...SS.guideCorner,...SS.guideCornerBR}}/>
+        </div>
+      )}
+
+      {/* Status bar */}
+      <div style={SS.statusBar}>
+        <div style={{...SS.statusDot,...(detected?SS.statusDotGreen:{})}}/>
+        <span style={SS.statusText}>{error||status}</span>
+        {!cvLoaded && <span style={SS.loadingBadge}>Loading scanner…</span>}
+      </div>
+
+      {/* Stability progress */}
+      {detected && !capturing && (
+        <div style={SS.stabilityWrap}>
+          <div style={SS.stabilityBar}/>
+        </div>
+      )}
+
+      {/* Controls */}
+      <div style={SS.controls}>
+        <button style={SS.closeBtn} onClick={onClose}>✕ Cancel</button>
+        <button style={{...SS.captureBtn,...(capturing?SS.captureBtnCapturing:{})}}
+          onClick={manualCapture} disabled={capturing}>
+          <div style={SS.captureRing}>
+            <div style={SS.captureInner}/>
+          </div>
+        </button>
+        <div style={{width:80}}/>
+      </div>
+
+      {/* Canvas for processing — hidden */}
+      <canvas ref={canvasRef} style={{display:"none"}}/>
+    </div>
+  );
+}
+
+// Scanner styles
+const SS = {
+  scannerWrap: { position:"fixed", inset:0, background:"#000", zIndex:200, display:"flex", flexDirection:"column" },
+  video: { position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover" },
+  overlay: { position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none" },
+  guideFrame: { position:"absolute", inset:"15%", border:"2px solid rgba(255,255,255,0.3)", borderRadius:8, pointerEvents:"none" },
+  guideCorner: { position:"absolute", width:24, height:24, borderColor:"#fff", borderStyle:"solid" },
+  guideCornerTL: { top:-2, left:-2, borderWidth:"3px 0 0 3px", borderRadius:"4px 0 0 0" },
+  guideCornerTR: { top:-2, right:-2, borderWidth:"3px 3px 0 0", borderRadius:"0 4px 0 0" },
+  guideCornerBL: { bottom:-2, left:-2, borderWidth:"0 0 3px 3px", borderRadius:"0 0 0 4px" },
+  guideCornerBR: { bottom:-2, right:-2, borderWidth:"0 3px 3px 0", borderRadius:"0 0 4px 0" },
+  statusBar: { position:"absolute", top:0, left:0, right:0, padding:"52px 20px 12px", background:"linear-gradient(to bottom, rgba(0,0,0,0.7), transparent)", display:"flex", alignItems:"center", gap:8 },
+  statusDot: { width:8, height:8, borderRadius:"50%", background:"#94a3b8", flexShrink:0 },
+  statusDotGreen: { background:"#22c55e", boxShadow:"0 0 6px #22c55e" },
+  statusText: { color:"#fff", fontSize:14, fontWeight:600 },
+  loadingBadge: { marginLeft:"auto", fontSize:11, color:"rgba(255,255,255,.6)", background:"rgba(255,255,255,.1)", padding:"3px 10px", borderRadius:20 },
+  stabilityWrap: { position:"absolute", bottom:120, left:"50%", transform:"translateX(-50%)", width:160, height:4, background:"rgba(255,255,255,.2)", borderRadius:4, overflow:"hidden" },
+  stabilityBar: { height:"100%", background:"#22c55e", borderRadius:4, animation:`stabilityFill ${STABILITY_MS}ms linear forwards` },
+  controls: { position:"absolute", bottom:0, left:0, right:0, padding:"20px 20px 40px", display:"flex", alignItems:"center", justifyContent:"space-between", background:"linear-gradient(to top, rgba(0,0,0,0.7), transparent)" },
+  closeBtn: { background:"rgba(255,255,255,.15)", border:"none", color:"#fff", fontWeight:600, fontSize:14, padding:"10px 16px", borderRadius:20, cursor:"pointer" },
+  captureBtn: { width:72, height:72, borderRadius:"50%", background:"transparent", border:"none", cursor:"pointer", padding:0 },
+  captureBtnCapturing: { opacity:.5 },
+  captureRing: { width:72, height:72, borderRadius:"50%", border:"3px solid #fff", display:"flex", alignItems:"center", justifyContent:"center" },
+  captureInner: { width:56, height:56, borderRadius:"50%", background:"#fff" },
+};
+
 // ── BROKER COLORS ─────────────────────────────────────────────────────────
 const BROKER_COLORS = ["#1e3a5f","#16a34a","#7c3aed","#ea580c","#0891b2","#be185d","#854d0e","#065f46"];
 function brokerColor(brokers, name) {
@@ -300,6 +639,7 @@ export default function App() {
   // Capture flow
   const [captureStep, setCaptureStep] = useState("idle"); // idle | preview | review
   const [previewImg, setPreviewImg] = useState(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
   const [blurScore, setBlurScore] = useState(null);
   const [blurWarning, setBlurWarning] = useState(false);
   const [gpsData, setGpsData] = useState(null);
@@ -312,6 +652,14 @@ export default function App() {
   const [exporting, setExporting] = useState(null);
   const fileRef = useRef();
   const today = new Date().toDateString();
+
+  // Inject scanner animation CSS
+  useEffect(() => {
+    const el = document.createElement("style");
+    el.textContent = `@keyframes stabilityFill { from { width: 0% } to { width: 100% } }`;
+    document.head.appendChild(el);
+    return () => { try { document.head.removeChild(el); } catch {} };
+  }, []);
 
   // ── INIT ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -430,9 +778,23 @@ export default function App() {
   // ── CAPTURE ───────────────────────────────────────────────────────────────
   function resetCapture() {
     setCaptureStep("idle");
+    setPreviewImg(null);
+    setScannerOpen(false);
     setBlurScore(null); setBlurWarning(false);
     setGpsData(null); setGpsStatus("idle");
     setEditData({}); setDuplicateWarning(null); setLoadError(null);
+  }
+
+  async function handleScannerCapture(dataUrl) {
+    setScannerOpen(false);
+    setGpsStatus("fetching");
+    setBlurScore(null);
+    const gpsPromise = getGPSLocation();
+    setPreviewImg(dataUrl);
+    setCaptureStep("preview");
+    const [coords, blur] = await Promise.all([gpsPromise, measureBlur(dataUrl)]);
+    setBlurScore(blur); setBlurWarning(blur < 80);
+    if (coords) { setGpsData(coords); setGpsStatus("ok"); } else setGpsStatus("failed");
   }
 
   async function handleFileSelect(e) {
@@ -594,6 +956,14 @@ export default function App() {
           <button style={S.signOutBtn} onClick={handleLogout}>Sign Out</button>
         </div>
 
+        {/* Live document scanner overlay */}
+        {scannerOpen && (
+          <LiveDocumentScanner
+            onCapture={handleScannerCapture}
+            onClose={()=>setScannerOpen(false)}
+          />
+        )}
+
         {/* Content area */}
         <div style={S.driverContent}>
 
@@ -606,9 +976,12 @@ export default function App() {
                   <div style={S.captureIconCircle}><CameraIcon size={36} /></div>
                   <div style={S.captureIdleTitle}>Capture Ticket</div>
                   <div style={S.captureIdleSub}>Next load: <strong>#{myTodayTickets.length+1}</strong></div>
-                  <button style={S.captureBigBtn} onClick={()=>fileRef.current.click()}>
+                  <button style={S.captureBigBtn} onClick={()=>setScannerOpen(true)}>
                     <CameraIcon size={20} color="#fff" />
                     <span>Scan Ticket</span>
+                  </button>
+                  <button style={{...S.ghostLink,marginTop:8,fontSize:13,color:C.muted}} onClick={()=>fileRef.current.click()}>
+                    Use photo library instead
                   </button>
                   <div style={S.captureHint}>
                     <InfoIcon />
@@ -657,7 +1030,7 @@ export default function App() {
                 <div style={S.actionRow}>
                   {blurWarning?(
                     <>
-                      <button style={S.solidBtn} onClick={()=>{resetCapture();setTimeout(()=>fileRef.current?.click(),100);}}>📷 Retake</button>
+                      <button style={S.solidBtn} onClick={()=>{resetCapture();setScannerOpen(true);}}>Retake</button>
                       <button style={{...S.outlineBtn}} onClick={handleAnalyze} disabled={loading}>{loading?"Analyzing…":"Use Anyway"}</button>
                     </>
                   ):(
@@ -1356,8 +1729,7 @@ const S = {
   loginAdminLink: { background:"none", border:"none", color:C.navy, fontWeight:600, fontSize:15, cursor:"pointer", padding:"4px 0" },
   loginVersion: { fontSize:12, color:C.dim, marginTop:20 },
   // App shell
-  app: { height:"100vh", background:C.bg, fontFamily:"-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", display:"flex", flexDirection:"column", overflow:"hidden" },
-  adminApp: { minHeight:"100vh", background:C.bg, fontFamily:"-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", paddingBottom:40 },
+  app: { height:"100vh", background:C.bg, fontFamily:"-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", display:"flex", flexDirection:"column", overflow:"hidden" },  adminApp: { minHeight:"100vh", background:C.bg, fontFamily:"-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", paddingBottom:40 },
   // Driver header
   driverHeader: { background:C.surface, borderBottom:`1px solid ${C.border}`, padding:"14px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 },
   driverName: { fontSize:18, fontWeight:700, color:C.navy },

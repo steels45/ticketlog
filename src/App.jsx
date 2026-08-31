@@ -195,6 +195,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
 
     rafRef.current = requestAnimationFrame(detect);
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cvLoaded]);
 
   function updateOverlay(corners, vw, vh) {

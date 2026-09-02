@@ -1106,9 +1106,14 @@ export default function App() {
   if (authState==="driver") {
     const displayImg = previewImg;
     const driverUnit = roster.find(d=>d.name===driverName)?.unit||null;
+    const nativeScanRef = useRef();
     return (
       <div style={S.app}>
+        {/* Camera capture — opens rear camera directly */}
         <input ref={fileRef} type="file" accept="image/*" capture="environment"
+          style={{display:"none"}} onChange={handleFileSelect} />
+        {/* Native document scan — on iOS Safari triggers Apple's document scanner */}
+        <input ref={nativeScanRef} type="file" accept="image/*"
           style={{display:"none"}} onChange={handleFileSelect} />
 
         {/* Header */}
@@ -1147,8 +1152,13 @@ export default function App() {
                     <CameraIcon size={20} color="#fff" />
                     <span>Scan Ticket</span>
                   </button>
-                  <button style={{...S.ghostLink,marginTop:8,fontSize:13,color:C.muted}} onClick={()=>fileRef.current.click()}>
-                    Use photo library instead
+                  <button style={{...S.outlineBtn,width:"100%",marginTop:8,fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}
+                    onClick={()=>nativeScanRef.current.click()}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                    Use Native Scanner
+                  </button>
+                  <button style={{...S.ghostLink,marginTop:4,fontSize:12,color:C.muted}} onClick={()=>fileRef.current.click()}>
+                    Use photo library
                   </button>
                   <div style={S.captureHint}>
                     <InfoIcon />

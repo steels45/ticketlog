@@ -149,7 +149,7 @@ function orderQuadCorners(pts) {
 
 function findBestQuad(pts, edges, dw, dh, minArea) {
   const c=pts.slice(0,8),n=c.length;
-  let best=null,bestScore=-1,bestArea=0;
+  let best=null,bestScore=-1;
 
   // Minimum quad area — must be at least 20% of frame
   const MIN_QUAD_AREA = dw * dh * 0.20;
@@ -185,7 +185,6 @@ function findBestQuad(pts, edges, dw, dh, minArea) {
 
     if (combinedScore > bestScore) {
       bestScore = combinedScore;
-      bestArea = area;
       best = ordered;
     }
   }

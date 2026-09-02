@@ -88,7 +88,7 @@ function detectWithHough(cv, src, dw, dh, minArea, scale) {
       if (pt&&pt.x>=-dw*0.1&&pt.x<=dw*1.1&&pt.y>=-dh*0.1&&pt.y<=dh*1.1) intersections.push(pt);
     }
     if (intersections.length<4) throw new Error("not enough intersections");
-    const best=findBestQuad(intersections,edges,dw,dh,minArea);
+    const best=findBestQuad(intersections,dw,dh,minArea);
     if (best) corners=best.map(pt=>({x:pt.x/scale,y:pt.y/scale}));
   } catch {}
   gray.delete(); blurred.delete(); edges.delete(); lines.delete();
@@ -118,19 +118,6 @@ function lineIntersect(l1,l2) {
   return {x:l1.x1+t*dx1,y:l1.y1+t*dy1};
 }
 
-function scoreQuad(pts,edges,steps=200) {
-  const d=edges.data,w=edges.cols;
-  let s=0;
-  for (let i=0;i<pts.length;i++) {
-    const a=pts[i],b=pts[(i+1)%pts.length];
-    for (let t=0;t<steps;t++) {
-      const x=Math.round(a.x+(t/steps)*(b.x-a.x)),y=Math.round(a.y+(t/steps)*(b.y-a.y));
-      if (x>=0&&x<edges.cols&&y>=0&&y<edges.rows) s+=d[y*w+x]>0?1:0;
-    }
-  }
-  return s;
-}
-
 function quadArea(pts) {
   let a=0;
   for (let i=0;i<pts.length;i++){const j=(i+1)%pts.length;a+=pts[i].x*pts[j].y-pts[j].x*pts[i].y;}
@@ -147,11 +134,10 @@ function orderQuadCorners(pts) {
   ];
 }
 
-function findBestQuad(pts, edges, dw, dh, minArea) {
+function findBestQuad(pts, dw, dh, minArea) {
   const c=pts.slice(0,8),n=c.length;
-  let best=null,bestScore=-1;
+  let best=null,bestArea=0;
 
-  // Minimum quad area — must be at least 20% of frame
   const MIN_QUAD_AREA = dw * dh * 0.20;
 
   for (let a=0;a<n-3;a++) for (let b=a+1;b<n-2;b++) for (let cc=b+1;cc<n-1;cc++) for (let d=cc+1;d<n;d++) {
@@ -165,26 +151,9 @@ function findBestQuad(pts, edges, dw, dh, minArea) {
     const r=Math.max(qw,qh)/(Math.min(qw,qh)||1);
     if (r<1.2||r>5.5) continue;
 
-    // Edge proximity filter — at least one corner must be near the frame border
-    // Document boundary touches or is close to the frame edge
-    // Interior lines (table borders) won't have corners near the frame edge
-    const EDGE_MARGIN = dw * 0.20; // within 20% of frame edge
-    const nearEdge = ordered.some(p =>
-      p.x < EDGE_MARGIN || p.x > dw - EDGE_MARGIN ||
-      p.y < EDGE_MARGIN || p.y > dh - EDGE_MARGIN
-    );
-    if (!nearEdge) continue;
-
-    // Score by edge strength along perimeter
-    const score = scoreQuad(ordered, edges);
-
-    // Prefer larger quads when scores are close (within 15%)
-    // This ensures document boundary beats interior lines
-    const areaBonus = area / (dw * dh); // 0-1 normalized area
-    const combinedScore = score * (1 + areaBonus * 0.3);
-
-    if (combinedScore > bestScore) {
-      bestScore = combinedScore;
+    // Simply pick the largest quad — document boundary is always outermost
+    if (area > bestArea) {
+      bestArea = area;
       best = ordered;
     }
   }
@@ -214,9 +183,7 @@ function detectPaperRegion(cv, src, dw, dh, minArea, scale) {
         const ys=Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
         const r=Math.max(...xs)-Math.min(...xs),rh=Math.max(...ys)-Math.min(...ys);
         const ratio=Math.max(r,rh)/Math.min(r,rh);
-        const MARGIN=dw*0.20;
-        const nearEdge=xs.some((x,i)=>x<MARGIN||x>dw-MARGIN||ys[i]<MARGIN||ys[i]>dh-MARGIN);
-        if (ratio>=1.2&&ratio<=5.0&&nearEdge){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
+        if (ratio>=1.2&&ratio<=5.0){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
       }
       approx.delete(); cnt.delete();
     }
@@ -249,9 +216,7 @@ function detectAdaptive(cv, src, dw, dh, minArea, scale) {
         const ys=Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
         const r=Math.max(...xs)-Math.min(...xs),rh=Math.max(...ys)-Math.min(...ys);
         const ratio=Math.max(r,rh)/Math.min(r,rh);
-        const MARGIN=dw*0.20;
-        const nearEdge=xs.some((x,i)=>x<MARGIN||x>dw-MARGIN||ys[i]<MARGIN||ys[i]>dh-MARGIN);
-        if (ratio>=1.2&&ratio<=5.0&&nearEdge){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
+        if (ratio>=1.2&&ratio<=5.0){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
       }
       approx.delete(); cnt.delete();
     }

@@ -239,6 +239,11 @@ function LiveDocumentScanner({ onCapture, onClose }) {
   const streamRef = useRef(null);
   const rafRef = useRef(null);
   const stableRef = useRef({ corners: null, since: null });
+  const smoothRef = useRef([]); // rolling window of last N detections
+  const lockedRef = useRef(null); // currently locked quad (hysteresis)
+  const SMOOTH_FRAMES = 5; // average over last 5 frames
+  const CONFIRM_FRAMES = 3; // need 3 consecutive detections before showing
+  const LOCK_DRIFT = 40; // pixels — how much drift before switching locked quad
   const [cvLoaded, setCvLoaded] = useState(window.cvReady);
   const [status, setStatus] = useState("Initializing camera…");
   const [detected, setDetected] = useState(false);
@@ -300,55 +305,95 @@ function LiveDocumentScanner({ onCapture, onClose }) {
       const canvas = canvasRef.current;
       if (!video || !canvas || video.readyState < 2) return;
 
-      // Downsample for detection
       const vw = video.videoWidth, vh = video.videoHeight;
       if (!vw || !vh) return;
       const scale = 480 / vw;
       const dw = 480, dh = Math.round(vh * scale);
       canvas.width = dw; canvas.height = dh;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0, dw, dh);
+      canvas.getContext("2d").drawImage(video, 0, 0, dw, dh);
 
-      let corners = null;
+      // ── Detection ────────────────────────────────────────────────────────
+      let rawCorners = null;
       try {
         const src = cv.imread(canvas);
         const minArea = dw * dh * MIN_AREA_RATIO;
-
-        // ── PASS 1: Hough Transform (Dropbox/CamScanner approach) ────────
-        // Best for low-contrast backgrounds — finds dominant lines and scores quads
-        corners = detectWithHough(cv, src, dw, dh, minArea, scale);
-
-        // ── PASS 2: HSV white paper region detection ─────────────────────
-        // Best for white tickets on dark/colored backgrounds
-        if (!corners) {
-          corners = detectPaperRegion(cv, src, dw, dh, minArea, scale);
-        }
-
-        // ── PASS 3: Adaptive threshold fallback ──────────────────────────
-        // Last resort — handles uneven lighting conditions
-        if (!corners) {
-          corners = detectAdaptive(cv, src, dw, dh, minArea, scale);
-        }
-
+        rawCorners = detectWithHough(cv, src, dw, dh, minArea, scale)
+          || detectPaperRegion(cv, src, dw, dh, minArea, scale)
+          || detectAdaptive(cv, src, dw, dh, minArea, scale);
         src.delete();
       } catch {}
 
-      // Update overlay
-      updateOverlay(corners, vw, vh);
+      // ── Aspect ratio filter — tickets are landscape 1.5:1 to 4:1 ─────────
+      if (rawCorners) {
+        const xs = rawCorners.map(c => c.x), ys = rawCorners.map(c => c.y);
+        const w = Math.max(...xs) - Math.min(...xs);
+        const h = Math.max(...ys) - Math.min(...ys);
+        const ratio = Math.max(w, h) / (Math.min(w, h) || 1);
+        if (ratio < 1.4 || ratio > 4.5) rawCorners = null;
+      }
 
-      // Stability check
-      if (corners) {
+      // ── Temporal smoothing — rolling window of last N frames ──────────────
+      const smooth = smoothRef.current;
+      if (rawCorners) {
+        smooth.push(rawCorners);
+        if (smooth.length > SMOOTH_FRAMES) smooth.shift();
+      } else {
+        // Decay — gradually remove old detections
+        if (smooth.length > 0) smooth.shift();
+      }
+
+      // ── Confidence threshold — need CONFIRM_FRAMES consecutive hits ───────
+      let smoothedCorners = null;
+      if (smooth.length >= CONFIRM_FRAMES) {
+        // Average corner positions across the window
+        smoothedCorners = smooth[0].map((_, ci) => ({
+          x: smooth.reduce((s, f) => s + f[ci].x, 0) / smooth.length,
+          y: smooth.reduce((s, f) => s + f[ci].y, 0) / smooth.length,
+        }));
+      }
+
+      // ── Hysteresis — don't switch quads unless drift is significant ────────
+      let displayCorners = null;
+      if (smoothedCorners) {
+        const locked = lockedRef.current;
+        if (locked) {
+          const drift = smoothedCorners.reduce((max, c, i) =>
+            Math.max(max, Math.abs(c.x - locked[i].x), Math.abs(c.y - locked[i].y)), 0);
+          if (drift < LOCK_DRIFT) {
+            // Drift is small — keep locked quad, just nudge it slightly
+            lockedRef.current = locked.map((lc, i) => ({
+              x: lc.x * 0.7 + smoothedCorners[i].x * 0.3,
+              y: lc.y * 0.7 + smoothedCorners[i].y * 0.3,
+            }));
+          } else {
+            // Significant drift — update to new position
+            lockedRef.current = smoothedCorners;
+          }
+        } else {
+          lockedRef.current = smoothedCorners;
+        }
+        displayCorners = lockedRef.current;
+      } else {
+        // No detection — slowly fade out locked quad
+        lockedRef.current = null;
+      }
+
+      // ── Update overlay ────────────────────────────────────────────────────
+      updateOverlay(displayCorners, vw, vh);
+
+      // ── Stability check for auto-capture ─────────────────────────────────
+      if (displayCorners) {
         const s = stableRef.current;
-        const same = s.corners && corners.every((c, i) =>
-          Math.abs(c.x - s.corners[i].x) < 12 && Math.abs(c.y - s.corners[i].y) < 12
+        const same = s.corners && displayCorners.every((c, i) =>
+          Math.abs(c.x - s.corners[i].x) < 8 && Math.abs(c.y - s.corners[i].y) < 8
         );
         if (same) {
           if (Date.now() - s.since >= STABILITY_MS) {
             stableRef.current = { corners: null, since: null };
-            doCapture(corners, video);
+            doCapture(displayCorners, video);
           }
         } else {
-          stableRef.current = { corners, since: Date.now() };
+          stableRef.current = { corners: displayCorners, since: Date.now() };
         }
         setDetected(true);
         setStatus("Hold steady…");
@@ -446,7 +491,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     if (!video) return;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setCapturing(true);
-    const corners = stableRef.current.corners;
+    const corners = lockedRef.current || stableRef.current.corners;
     if (corners && window.cvReady) {
       doCapture(corners, video);
     } else {

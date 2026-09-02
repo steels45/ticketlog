@@ -818,6 +818,7 @@ export default function App() {
   const [loadError, setLoadError] = useState(null);
   const [exporting, setExporting] = useState(null);
   const fileRef = useRef();
+  const nativeScanRef = useRef();
   const today = new Date().toDateString();
 
   // Inject scanner animation CSS
@@ -1106,7 +1107,6 @@ export default function App() {
   if (authState==="driver") {
     const displayImg = previewImg;
     const driverUnit = roster.find(d=>d.name===driverName)?.unit||null;
-    const nativeScanRef = useRef();
     return (
       <div style={S.app}>
         {/* Camera capture — opens rear camera directly */}

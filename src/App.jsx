@@ -49,127 +49,185 @@ const MIN_AREA_RATIO = 0.15;
 const MAX_LONG_EDGE = 2000;
 const JPEG_QUALITY = 0.85;
 
-// ── PAPER DETECTION HELPERS ───────────────────────────────────────────────
+// ── DOCUMENT DETECTION HELPERS ───────────────────────────────────────────
 
-// Pass 1: HSV white/light region detection
-// Tickets are almost always white or off-white paper
-function detectPaperRegion(cv, src, dw, dh, minArea, scale) {
-  const hsv = new cv.Mat();
-  const mask = new cv.Mat();
-  const closed = new cv.Mat();
-  const contours = new cv.MatVector();
-  const hierarchy = new cv.Mat();
-  let corners = null;
-
-  try {
-    // Convert to HSV
-    cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
-    cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
-
-    // White/off-white paper: low saturation, high value
-    // S: 0-40 (barely saturated), V: 160-255 (bright)
-    const lower = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 0, 160, 0]);
-    const upper = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 55, 255, 255]);
-    cv.inRange(hsv, lower, upper, mask);
-    lower.delete(); upper.delete();
-
-    // Morphological closing — fills gaps from text, lines, glare
-    const closeKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 15));
-    cv.morphologyEx(mask, closed, cv.MORPH_CLOSE, closeKernel);
-    closeKernel.delete();
-
-    // Find contours in the white mask
-    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    let maxArea = 0, best = null;
-    for (let i = 0; i < contours.size(); i++) {
-      const cnt = contours.get(i);
-      const area = cv.contourArea(cnt);
-      if (area < minArea) { cnt.delete(); continue; }
-      const peri = cv.arcLength(cnt, true);
-      const approx = new cv.Mat();
-      cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-      if (approx.rows === 4 && area > maxArea) {
-        // Validate aspect ratio — tickets are typically 1.5:1 to 4:1
-        const xs = Array.from({length:4},(_,j)=>approx.data32S[j*2]);
-        const ys = Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
-        const w = Math.max(...xs) - Math.min(...xs);
-        const h = Math.max(...ys) - Math.min(...ys);
-        const ratio = Math.max(w,h) / Math.min(w,h);
-        if (ratio >= 1.2 && ratio <= 5.0) {
-          maxArea = area;
-          best = Array.from({length:4}, (_,j) => ({
-            x: approx.data32S[j*2] / scale,
-            y: approx.data32S[j*2+1] / scale,
-          }));
-        }
-      }
-      approx.delete(); cnt.delete();
-    }
-    corners = best;
-  } catch {}
-
-  hsv.delete(); mask.delete(); closed.delete(); contours.delete(); hierarchy.delete();
-  return corners;
-}
-
-// Pass 2: Adaptive threshold — handles uneven lighting
-function detectAdaptive(cv, src, dw, dh, minArea, scale) {
+// Pass 1: Hough Transform — finds dominant straight lines and scores quads
+// (Dropbox/CamScanner approach: edges → lines → intersections → best quad)
+function detectWithHough(cv, src, dw, dh, minArea, scale) {
   const gray = new cv.Mat();
   const blurred = new cv.Mat();
-  const thresh = new cv.Mat();
-  const closed = new cv.Mat();
-  const contours = new cv.MatVector();
-  const hierarchy = new cv.Mat();
+  const edges = new cv.Mat();
+  const lines = new cv.Mat();
   let corners = null;
-
   try {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    // Auto thresholds via Otsu
+    const hi = cv.threshold(blurred, new cv.Mat(), 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    cv.Canny(blurred, edges, hi * 0.5, hi);
+    const k = cv.Mat.ones(3, 3, cv.CV_8U);
+    cv.dilate(edges, edges, k); k.delete();
+    cv.HoughLinesP(edges, lines, 1, Math.PI / 180, 50, dw * 0.1, 20);
+    if (lines.rows < 4) throw new Error("not enough lines");
+    const lineObjs = [];
+    for (let i = 0; i < lines.rows; i++) {
+      const x1=lines.data32S[i*4],y1=lines.data32S[i*4+1],x2=lines.data32S[i*4+2],y2=lines.data32S[i*4+3];
+      const len=Math.sqrt((x2-x1)**2+(y2-y1)**2);
+      const angle=Math.atan2(y2-y1,x2-x1);
+      lineObjs.push({x1,y1,x2,y2,len,angle});
+    }
+    const horizontal=lineObjs.filter(l=>Math.abs(Math.cos(l.angle))>0.5).sort((a,b)=>b.len-a.len);
+    const vertical=lineObjs.filter(l=>Math.abs(Math.sin(l.angle))>0.5).sort((a,b)=>b.len-a.len);
+    if (horizontal.length<2||vertical.length<2) throw new Error("not enough H/V lines");
+    const topH=mergeParallelLines(horizontal.slice(0,8),true);
+    const topV=mergeParallelLines(vertical.slice(0,8),false);
+    if (topH.length<2||topV.length<2) throw new Error("not enough merged lines");
+    const intersections=[];
+    for (const h of topH) for (const v of topV) {
+      const pt=lineIntersect(h,v);
+      if (pt&&pt.x>=-dw*0.1&&pt.x<=dw*1.1&&pt.y>=-dh*0.1&&pt.y<=dh*1.1) intersections.push(pt);
+    }
+    if (intersections.length<4) throw new Error("not enough intersections");
+    const best=findBestQuad(intersections,edges,dw,dh,minArea);
+    if (best) corners=best.map(pt=>({x:pt.x/scale,y:pt.y/scale}));
+  } catch {}
+  gray.delete(); blurred.delete(); edges.delete(); lines.delete();
+  return corners;
+}
 
-    // Adaptive threshold handles shadows and uneven lighting better than Canny
-    cv.adaptiveThreshold(blurred, thresh, 255,
-      cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2);
+function mergeParallelLines(lines,isHorizontal) {
+  const merged=[],used=new Set(),DIST=20;
+  for (let i=0;i<lines.length;i++) {
+    if (used.has(i)) continue;
+    const group=[lines[i]]; used.add(i);
+    for (let j=i+1;j<lines.length;j++) {
+      if (used.has(j)) continue;
+      const d=isHorizontal?Math.abs(lines[i].y1-lines[j].y1):Math.abs(lines[i].x1-lines[j].x1);
+      if (d<DIST) {group.push(lines[j]);used.add(j);}
+    }
+    merged.push(group.reduce((a,b)=>a.len>b.len?a:b));
+  }
+  return merged;
+}
 
-    // Invert — we want paper (bright) as foreground
-    cv.bitwise_not(thresh, thresh);
+function lineIntersect(l1,l2) {
+  const dx1=l1.x2-l1.x1,dy1=l1.y2-l1.y1,dx2=l2.x2-l2.x1,dy2=l2.y2-l2.y1;
+  const d=dx1*dy2-dy1*dx2;
+  if (Math.abs(d)<1e-6) return null;
+  const t=((l2.x1-l1.x1)*dy2-(l2.y1-l1.y1)*dx2)/d;
+  return {x:l1.x1+t*dx1,y:l1.y1+t*dy1};
+}
 
-    // Morphological closing — connects broken edges from print/lines
-    const closeKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
-    cv.morphologyEx(thresh, closed, cv.MORPH_CLOSE, closeKernel);
-    closeKernel.delete();
+function scoreQuad(pts,edges,steps=200) {
+  const d=edges.data,w=edges.cols;
+  let s=0;
+  for (let i=0;i<pts.length;i++) {
+    const a=pts[i],b=pts[(i+1)%pts.length];
+    for (let t=0;t<steps;t++) {
+      const x=Math.round(a.x+(t/steps)*(b.x-a.x)),y=Math.round(a.y+(t/steps)*(b.y-a.y));
+      if (x>=0&&x<edges.cols&&y>=0&&y<edges.rows) s+=d[y*w+x]>0?1:0;
+    }
+  }
+  return s;
+}
 
-    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+function quadArea(pts) {
+  let a=0;
+  for (let i=0;i<pts.length;i++){const j=(i+1)%pts.length;a+=pts[i].x*pts[j].y-pts[j].x*pts[i].y;}
+  return Math.abs(a)/2;
+}
 
-    let maxArea = 0, best = null;
-    for (let i = 0; i < contours.size(); i++) {
-      const cnt = contours.get(i);
-      const area = cv.contourArea(cnt);
-      if (area < minArea) { cnt.delete(); continue; }
-      const peri = cv.arcLength(cnt, true);
-      const approx = new cv.Mat();
-      cv.approxPolyDP(cnt, approx, 0.03 * peri, true); // slightly looser epsilon
-      if (approx.rows === 4 && area > maxArea) {
-        const xs = Array.from({length:4},(_,j)=>approx.data32S[j*2]);
-        const ys = Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
-        const w = Math.max(...xs) - Math.min(...xs);
-        const h = Math.max(...ys) - Math.min(...ys);
-        const ratio = Math.max(w,h) / Math.min(w,h);
-        if (ratio >= 1.2 && ratio <= 5.0) {
-          maxArea = area;
-          best = Array.from({length:4}, (_,j) => ({
-            x: approx.data32S[j*2] / scale,
-            y: approx.data32S[j*2+1] / scale,
-          }));
-        }
+function orderQuadCorners(pts) {
+  const cx=pts.reduce((s,p)=>s+p.x,0)/4,cy=pts.reduce((s,p)=>s+p.y,0)/4;
+  return [
+    pts.filter(p=>p.x<=cx&&p.y<=cy)[0]||pts[0],
+    pts.filter(p=>p.x>cx&&p.y<=cy)[0]||pts[1],
+    pts.filter(p=>p.x>cx&&p.y>cy)[0]||pts[2],
+    pts.filter(p=>p.x<=cx&&p.y>cy)[0]||pts[3],
+  ];
+}
+
+function findBestQuad(pts,edges,dw,dh,minArea) {
+  const c=pts.slice(0,8),n=c.length;
+  let best=null,bestScore=-1;
+  for (let a=0;a<n-3;a++) for (let b=a+1;b<n-2;b++) for (let cc=b+1;cc<n-1;cc++) for (let d=cc+1;d<n;d++) {
+    const ordered=orderQuadCorners([c[a],c[b],c[cc],c[d]]);
+    const area=quadArea(ordered);
+    if (area<minArea) continue;
+    const xs=ordered.map(p=>p.x),ys=ordered.map(p=>p.y);
+    const ratio=Math.max(...xs)-Math.min(...xs);
+    const ratio2=Math.max(...ys)-Math.min(...ys);
+    const r=Math.max(ratio,ratio2)/(Math.min(ratio,ratio2)||1);
+    if (r<1.2||r>5.5) continue;
+    const score=scoreQuad(ordered,edges);
+    if (score>bestScore){bestScore=score;best=ordered;}
+  }
+  return best;
+}
+
+// Pass 2: HSV white paper detection
+function detectPaperRegion(cv, src, dw, dh, minArea, scale) {
+  const hsv=new cv.Mat(),mask=new cv.Mat(),closed=new cv.Mat(),contours=new cv.MatVector(),hierarchy=new cv.Mat();
+  let corners=null;
+  try {
+    cv.cvtColor(src,hsv,cv.COLOR_RGBA2RGB); cv.cvtColor(hsv,hsv,cv.COLOR_RGB2HSV);
+    const lower=new cv.Mat(hsv.rows,hsv.cols,hsv.type(),[0,0,160,0]);
+    const upper=new cv.Mat(hsv.rows,hsv.cols,hsv.type(),[180,55,255,255]);
+    cv.inRange(hsv,lower,upper,mask); lower.delete(); upper.delete();
+    const ck=cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(15,15));
+    cv.morphologyEx(mask,closed,cv.MORPH_CLOSE,ck); ck.delete();
+    cv.findContours(closed,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+    let maxArea=0,best=null;
+    for (let i=0;i<contours.size();i++) {
+      const cnt=contours.get(i),area=cv.contourArea(cnt);
+      if (area<minArea){cnt.delete();continue;}
+      const peri=cv.arcLength(cnt,true),approx=new cv.Mat();
+      cv.approxPolyDP(cnt,approx,0.02*peri,true);
+      if (approx.rows===4&&area>maxArea) {
+        const xs=Array.from({length:4},(_,j)=>approx.data32S[j*2]);
+        const ys=Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
+        const r=Math.max(...xs)-Math.min(...xs),rh=Math.max(...ys)-Math.min(...ys);
+        const ratio=Math.max(r,rh)/Math.min(r,rh);
+        if (ratio>=1.2&&ratio<=5.0){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
       }
       approx.delete(); cnt.delete();
     }
-    corners = best;
+    corners=best;
   } catch {}
+  hsv.delete();mask.delete();closed.delete();contours.delete();hierarchy.delete();
+  return corners;
+}
 
-  gray.delete(); blurred.delete(); thresh.delete();
-  closed.delete(); contours.delete(); hierarchy.delete();
+// Pass 3: Adaptive threshold fallback
+function detectAdaptive(cv, src, dw, dh, minArea, scale) {
+  const gray=new cv.Mat(),blurred=new cv.Mat(),thresh=new cv.Mat(),closed=new cv.Mat(),contours=new cv.MatVector(),hierarchy=new cv.Mat();
+  let corners=null;
+  try {
+    cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray,blurred,new cv.Size(5,5),0);
+    cv.adaptiveThreshold(blurred,thresh,255,cv.ADAPTIVE_THRESH_GAUSSIAN_C,cv.THRESH_BINARY,11,2);
+    cv.bitwise_not(thresh,thresh);
+    const ck=cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(7,7));
+    cv.morphologyEx(thresh,closed,cv.MORPH_CLOSE,ck); ck.delete();
+    cv.findContours(closed,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+    let maxArea=0,best=null;
+    for (let i=0;i<contours.size();i++) {
+      const cnt=contours.get(i),area=cv.contourArea(cnt);
+      if (area<minArea){cnt.delete();continue;}
+      const peri=cv.arcLength(cnt,true),approx=new cv.Mat();
+      cv.approxPolyDP(cnt,approx,0.03*peri,true);
+      if (approx.rows===4&&area>maxArea) {
+        const xs=Array.from({length:4},(_,j)=>approx.data32S[j*2]);
+        const ys=Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
+        const r=Math.max(...xs)-Math.min(...xs),rh=Math.max(...ys)-Math.min(...ys);
+        const ratio=Math.max(r,rh)/Math.min(r,rh);
+        if (ratio>=1.2&&ratio<=5.0){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
+      }
+      approx.delete(); cnt.delete();
+    }
+    corners=best;
+  } catch {}
+  gray.delete();blurred.delete();thresh.delete();closed.delete();contours.delete();hierarchy.delete();
   return corners;
 }
 
@@ -256,10 +314,18 @@ function LiveDocumentScanner({ onCapture, onClose }) {
         const src = cv.imread(canvas);
         const minArea = dw * dh * MIN_AREA_RATIO;
 
-        // ── PASS 1: White/light paper region detection (HSV) ────────────
-        corners = detectPaperRegion(cv, src, dw, dh, minArea, scale);
+        // ── PASS 1: Hough Transform (Dropbox/CamScanner approach) ────────
+        // Best for low-contrast backgrounds — finds dominant lines and scores quads
+        corners = detectWithHough(cv, src, dw, dh, minArea, scale);
 
-        // ── PASS 2: Adaptive threshold fallback ─────────────────────────
+        // ── PASS 2: HSV white paper region detection ─────────────────────
+        // Best for white tickets on dark/colored backgrounds
+        if (!corners) {
+          corners = detectPaperRegion(cv, src, dw, dh, minArea, scale);
+        }
+
+        // ── PASS 3: Adaptive threshold fallback ──────────────────────────
+        // Last resort — handles uneven lighting conditions
         if (!corners) {
           corners = detectAdaptive(cv, src, dw, dh, minArea, scale);
         }

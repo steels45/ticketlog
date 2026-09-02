@@ -49,6 +49,130 @@ const MIN_AREA_RATIO = 0.15;
 const MAX_LONG_EDGE = 2000;
 const JPEG_QUALITY = 0.85;
 
+// ── PAPER DETECTION HELPERS ───────────────────────────────────────────────
+
+// Pass 1: HSV white/light region detection
+// Tickets are almost always white or off-white paper
+function detectPaperRegion(cv, src, dw, dh, minArea, scale) {
+  const hsv = new cv.Mat();
+  const mask = new cv.Mat();
+  const closed = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  let corners = null;
+
+  try {
+    // Convert to HSV
+    cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+
+    // White/off-white paper: low saturation, high value
+    // S: 0-40 (barely saturated), V: 160-255 (bright)
+    const lower = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 0, 160, 0]);
+    const upper = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 55, 255, 255]);
+    cv.inRange(hsv, lower, upper, mask);
+    lower.delete(); upper.delete();
+
+    // Morphological closing — fills gaps from text, lines, glare
+    const closeKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 15));
+    cv.morphologyEx(mask, closed, cv.MORPH_CLOSE, closeKernel);
+    closeKernel.delete();
+
+    // Find contours in the white mask
+    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    let maxArea = 0, best = null;
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      if (area < minArea) { cnt.delete(); continue; }
+      const peri = cv.arcLength(cnt, true);
+      const approx = new cv.Mat();
+      cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+      if (approx.rows === 4 && area > maxArea) {
+        // Validate aspect ratio — tickets are typically 1.5:1 to 4:1
+        const xs = Array.from({length:4},(_,j)=>approx.data32S[j*2]);
+        const ys = Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
+        const w = Math.max(...xs) - Math.min(...xs);
+        const h = Math.max(...ys) - Math.min(...ys);
+        const ratio = Math.max(w,h) / Math.min(w,h);
+        if (ratio >= 1.2 && ratio <= 5.0) {
+          maxArea = area;
+          best = Array.from({length:4}, (_,j) => ({
+            x: approx.data32S[j*2] / scale,
+            y: approx.data32S[j*2+1] / scale,
+          }));
+        }
+      }
+      approx.delete(); cnt.delete();
+    }
+    corners = best;
+  } catch {}
+
+  hsv.delete(); mask.delete(); closed.delete(); contours.delete(); hierarchy.delete();
+  return corners;
+}
+
+// Pass 2: Adaptive threshold — handles uneven lighting
+function detectAdaptive(cv, src, dw, dh, minArea, scale) {
+  const gray = new cv.Mat();
+  const blurred = new cv.Mat();
+  const thresh = new cv.Mat();
+  const closed = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  let corners = null;
+
+  try {
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+
+    // Adaptive threshold handles shadows and uneven lighting better than Canny
+    cv.adaptiveThreshold(blurred, thresh, 255,
+      cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2);
+
+    // Invert — we want paper (bright) as foreground
+    cv.bitwise_not(thresh, thresh);
+
+    // Morphological closing — connects broken edges from print/lines
+    const closeKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
+    cv.morphologyEx(thresh, closed, cv.MORPH_CLOSE, closeKernel);
+    closeKernel.delete();
+
+    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    let maxArea = 0, best = null;
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      if (area < minArea) { cnt.delete(); continue; }
+      const peri = cv.arcLength(cnt, true);
+      const approx = new cv.Mat();
+      cv.approxPolyDP(cnt, approx, 0.03 * peri, true); // slightly looser epsilon
+      if (approx.rows === 4 && area > maxArea) {
+        const xs = Array.from({length:4},(_,j)=>approx.data32S[j*2]);
+        const ys = Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
+        const w = Math.max(...xs) - Math.min(...xs);
+        const h = Math.max(...ys) - Math.min(...ys);
+        const ratio = Math.max(w,h) / Math.min(w,h);
+        if (ratio >= 1.2 && ratio <= 5.0) {
+          maxArea = area;
+          best = Array.from({length:4}, (_,j) => ({
+            x: approx.data32S[j*2] / scale,
+            y: approx.data32S[j*2+1] / scale,
+          }));
+        }
+      }
+      approx.delete(); cnt.delete();
+    }
+    corners = best;
+  } catch {}
+
+  gray.delete(); blurred.delete(); thresh.delete();
+  closed.delete(); contours.delete(); hierarchy.delete();
+  return corners;
+}
+
 // ── LIVE DOCUMENT SCANNER ─────────────────────────────────────────────────
 function LiveDocumentScanner({ onCapture, onClose }) {
   const videoRef = useRef(null);
@@ -130,41 +254,17 @@ function LiveDocumentScanner({ onCapture, onClose }) {
       let corners = null;
       try {
         const src = cv.imread(canvas);
-        const gray = new cv.Mat();
-        const blur = new cv.Mat();
-        const edges = new cv.Mat();
-        const dilated = new cv.Mat();
-        const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-        const contours = new cv.MatVector();
-        const hierarchy = new cv.Mat();
-
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-        cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-        cv.Canny(blur, edges, 50, 150);
-        cv.dilate(edges, dilated, kernel);
-        cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-        let maxArea = 0, best = null;
         const minArea = dw * dh * MIN_AREA_RATIO;
-        for (let i = 0; i < contours.size(); i++) {
-          const cnt = contours.get(i);
-          const area = cv.contourArea(cnt);
-          if (area < minArea) { cnt.delete(); continue; }
-          const peri = cv.arcLength(cnt, true);
-          const approx = new cv.Mat();
-          cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-          if (approx.rows === 4 && area > maxArea) {
-            maxArea = area;
-            best = Array.from({ length: 4 }, (_, j) => ({
-              x: approx.data32S[j * 2] / scale,
-              y: approx.data32S[j * 2 + 1] / scale,
-            }));
-          }
-          approx.delete(); cnt.delete();
+
+        // ── PASS 1: White/light paper region detection (HSV) ────────────
+        corners = detectPaperRegion(cv, src, dw, dh, minArea, scale);
+
+        // ── PASS 2: Adaptive threshold fallback ─────────────────────────
+        if (!corners) {
+          corners = detectAdaptive(cv, src, dw, dh, minArea, scale);
         }
-        corners = best;
-        src.delete(); gray.delete(); blur.delete(); edges.delete();
-        dilated.delete(); kernel.delete(); contours.delete(); hierarchy.delete();
+
+        src.delete();
       } catch {}
 
       // Update overlay

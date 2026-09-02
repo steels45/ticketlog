@@ -45,7 +45,7 @@ function periodLabel(period) {
 // ── SCANNER CONSTANTS ─────────────────────────────────────────────────────
 const SCAN_FPS = 12;
 const STABILITY_MS = 600;
-const MIN_AREA_RATIO = 0.15;
+const MIN_AREA_RATIO = 0.20; // document must be at least 20% of frame area
 const MAX_LONG_EDGE = 2000;
 const JPEG_QUALITY = 0.85;
 
@@ -147,20 +147,47 @@ function orderQuadCorners(pts) {
   ];
 }
 
-function findBestQuad(pts,edges,dw,dh,minArea) {
+function findBestQuad(pts, edges, dw, dh, minArea) {
   const c=pts.slice(0,8),n=c.length;
-  let best=null,bestScore=-1;
+  let best=null,bestScore=-1,bestArea=0;
+
+  // Minimum quad area — must be at least 20% of frame
+  const MIN_QUAD_AREA = dw * dh * 0.20;
+
   for (let a=0;a<n-3;a++) for (let b=a+1;b<n-2;b++) for (let cc=b+1;cc<n-1;cc++) for (let d=cc+1;d<n;d++) {
     const ordered=orderQuadCorners([c[a],c[b],c[cc],c[d]]);
     const area=quadArea(ordered);
-    if (area<minArea) continue;
+    if (area<Math.max(minArea, MIN_QUAD_AREA)) continue;
+
     const xs=ordered.map(p=>p.x),ys=ordered.map(p=>p.y);
-    const ratio=Math.max(...xs)-Math.min(...xs);
-    const ratio2=Math.max(...ys)-Math.min(...ys);
-    const r=Math.max(ratio,ratio2)/(Math.min(ratio,ratio2)||1);
+    const qw=Math.max(...xs)-Math.min(...xs);
+    const qh=Math.max(...ys)-Math.min(...ys);
+    const r=Math.max(qw,qh)/(Math.min(qw,qh)||1);
     if (r<1.2||r>5.5) continue;
-    const score=scoreQuad(ordered,edges);
-    if (score>bestScore){bestScore=score;best=ordered;}
+
+    // Edge proximity filter — at least one corner must be near the frame border
+    // Document boundary touches or is close to the frame edge
+    // Interior lines (table borders) won't have corners near the frame edge
+    const EDGE_MARGIN = dw * 0.20; // within 20% of frame edge
+    const nearEdge = ordered.some(p =>
+      p.x < EDGE_MARGIN || p.x > dw - EDGE_MARGIN ||
+      p.y < EDGE_MARGIN || p.y > dh - EDGE_MARGIN
+    );
+    if (!nearEdge) continue;
+
+    // Score by edge strength along perimeter
+    const score = scoreQuad(ordered, edges);
+
+    // Prefer larger quads when scores are close (within 15%)
+    // This ensures document boundary beats interior lines
+    const areaBonus = area / (dw * dh); // 0-1 normalized area
+    const combinedScore = score * (1 + areaBonus * 0.3);
+
+    if (combinedScore > bestScore) {
+      bestScore = combinedScore;
+      bestArea = area;
+      best = ordered;
+    }
   }
   return best;
 }
@@ -188,7 +215,9 @@ function detectPaperRegion(cv, src, dw, dh, minArea, scale) {
         const ys=Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
         const r=Math.max(...xs)-Math.min(...xs),rh=Math.max(...ys)-Math.min(...ys);
         const ratio=Math.max(r,rh)/Math.min(r,rh);
-        if (ratio>=1.2&&ratio<=5.0){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
+        const MARGIN=dw*0.20;
+        const nearEdge=xs.some((x,i)=>x<MARGIN||x>dw-MARGIN||ys[i]<MARGIN||ys[i]>dh-MARGIN);
+        if (ratio>=1.2&&ratio<=5.0&&nearEdge){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
       }
       approx.delete(); cnt.delete();
     }
@@ -221,7 +250,9 @@ function detectAdaptive(cv, src, dw, dh, minArea, scale) {
         const ys=Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
         const r=Math.max(...xs)-Math.min(...xs),rh=Math.max(...ys)-Math.min(...ys);
         const ratio=Math.max(r,rh)/Math.min(r,rh);
-        if (ratio>=1.2&&ratio<=5.0){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
+        const MARGIN=dw*0.20;
+        const nearEdge=xs.some((x,i)=>x<MARGIN||x>dw-MARGIN||ys[i]<MARGIN||ys[i]>dh-MARGIN);
+        if (ratio>=1.2&&ratio<=5.0&&nearEdge){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
       }
       approx.delete(); cnt.delete();
     }

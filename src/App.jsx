@@ -158,11 +158,11 @@ function LiveDocumentScanner({ onCapture, onClose }) {
           detector: "ml",
           maxProcessingDimension: 640,
           ml: {
-            assetBaseUrl: "https://cdn.jsdelivr.net/npm/scanic@1.6.0/dist/",
+            assetBaseUrl: "/",
           },
         });
-        console.log("Scan result:", result?.success, result?.score, result?.corners);
-        if (result.success && result.corners && result.score > 0.6) {
+        console.log("Scan result:", result?.success, result?.score?.toFixed(2), result?.corners?.topLeft);
+        if (result.success && result.corners && (result.score === undefined || result.score > 0.5)) {
           // Scanic returns named corners: topLeft, topRight, bottomRight, bottomLeft
           const c = result.corners;
           rawCorners = [

@@ -74,8 +74,10 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     async function loadScanic() {
       try {
         const { Scanner } = await import("scanic");
+        console.log("Scanic imported OK");
         const scanner = new Scanner();
         await scanner.initialize();
+        console.log("Scanic initialized OK");
         if (!cancelled) {
           scannerRef.current = scanner;
           setScanicReady(true);
@@ -151,7 +153,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
           maxProcessingDimension: 640,
           enableDetectionCascade: true,
         });
-
+        console.log("Scan result:", result?.success, result?.corners);
         if (result.success && result.corners) {
           // Scanic returns named corners: topLeft, topRight, bottomRight, bottomLeft
           const c = result.corners;

@@ -113,6 +113,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Update status when Scanic loads
@@ -219,8 +220,8 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     }
 
     rafRef.current = requestAnimationFrame(detect);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanicReady, capturing]);
 
   function updateOverlay(corners, vw, vh) {

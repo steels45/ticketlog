@@ -234,11 +234,14 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     if (!overlay) return;
     if (!corners) { overlay.innerHTML = ""; return; }
     const rect = overlay.getBoundingClientRect();
-    const sx = rect.width / vw, sy = rect.height / vh;
-    const pts = corners.map(c => `${c.x * sx},${c.y * sy}`).join(" ");
+    if (!rect.width || !rect.height) return;
+    // Set explicit viewBox to match video dimensions
+    overlay.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
+    overlay.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    const pts = corners.map(c => `${c.x},${c.y}`).join(" ");
     overlay.innerHTML = `
-      <polygon points="${pts}" fill="rgba(30,58,95,0.12)" stroke="#1e3a5f" stroke-width="2.5" stroke-dasharray="8,4"/>
-      ${corners.map(c => `<circle cx="${c.x * sx}" cy="${c.y * sy}" r="7" fill="#1e3a5f"/>`).join("")}
+      <polygon points="${pts}" fill="rgba(30,58,95,0.15)" stroke="#1e3a5f" stroke-width="8" stroke-dasharray="20,10"/>
+      ${corners.map(c => `<circle cx="${c.x}" cy="${c.y}" r="20" fill="#1e3a5f"/>`).join("")}
     `;
   }
 
@@ -342,7 +345,7 @@ function LiveDocumentScanner({ onCapture, onClose }) {
 const SS = {
   scannerWrap: { position:"fixed", inset:0, background:"#000", zIndex:200, display:"flex", flexDirection:"column" },
   video: { position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover" },
-  overlay: { position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none" },
+  overlay: { position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none", objectFit:"cover" },
   guideFrame: { position:"absolute", inset:"15%", border:"2px solid rgba(255,255,255,0.3)", borderRadius:8, pointerEvents:"none" },
   guideCorner: { position:"absolute", width:24, height:24, borderColor:"#fff", borderStyle:"solid" },
   guideCornerTL: { top:-2, left:-2, borderWidth:"3px 0 0 3px", borderRadius:"4px 0 0 0" },

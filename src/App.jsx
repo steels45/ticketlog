@@ -150,11 +150,11 @@ function LiveDocumentScanner({ onCapture, onClose }) {
       try {
         const result = await scannerRef.current.scan(canvas, {
           mode: "detect",
+          detector: "ml",
           maxProcessingDimension: 640,
-          enableDetectionCascade: true,
         });
-        console.log("Scan result:", result?.success, result?.corners);
-        if (result.success && result.corners) {
+        console.log("Scan result:", result?.success, result?.score, result?.corners);
+        if (result.success && result.corners && result.score > 0.6) {
           // Scanic returns named corners: topLeft, topRight, bottomRight, bottomLeft
           const c = result.corners;
           rawCorners = [

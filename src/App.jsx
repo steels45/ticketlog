@@ -137,7 +137,12 @@ function LiveDocumentScanner({ onCapture, onClose }) {
 
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      if (!video || !canvas || video.readyState < 2 || capturing) return;
+      if (!video || !canvas || video.readyState < 2 || capturing) {
+        console.log("Loop skip:", !video, !canvas, video?.readyState, capturing);
+        return;
+      }
+
+      console.log("Running scan frame", video.videoWidth, video.videoHeight);
 
       const vw = video.videoWidth, vh = video.videoHeight;
       if (!vw || !vh) return;

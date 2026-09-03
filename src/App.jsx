@@ -47,6 +47,323 @@ const MAX_LONG_EDGE = 2000;
 const JPEG_QUALITY = 0.85;
 const STABILITY_MS = 800;
 
+// ── LIVE DOCUMENT SCANNER (powered by Scanic) ─────────────────────────────
+function LiveDocumentScanner({ onCapture, onClose }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const overlayRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const scannerRef = useRef(null); // persistent Scanic Scanner instance
+  const stableRef = useRef({ corners: null, since: null });
+  const smoothRef = useRef([]);
+  const lockedRef = useRef(null);
+  const SMOOTH_FRAMES = 4;
+  const CONFIRM_FRAMES = 3;
+  const LOCK_DRIFT = 30;
+
+  const [status, setStatus] = useState("Initializing camera…");
+  const [detected, setDetected] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const [scanicReady, setScanicReady] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Load Scanic Scanner instance
+  useEffect(() => {
+    let cancelled = false;
+    async function loadScanic() {
+      try {
+        const { Scanner } = await import("scanic");
+        const scanner = new Scanner();
+        await scanner.initialize();
+        if (!cancelled) {
+          scannerRef.current = scanner;
+          setScanicReady(true);
+        }
+      } catch (err) {
+        console.warn("Scanic failed to load:", err);
+      }
+    }
+    loadScanic();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Start camera
+  useEffect(() => {
+    let cancelled = false;
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+          setStatus("Loading scanner…");
+        }
+      } catch {
+        if (!cancelled) setError("Camera access denied. Use the manual option below.");
+      }
+    }
+    startCamera();
+    return () => {
+      cancelled = true;
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Update status when ready
+  useEffect(() => {
+    if (scanicReady) setStatus("Point camera at ticket");
+  }, [scanicReady]);
+
+  // Detection loop using persistent Scanner instance
+  useEffect(() => {
+    if (!scanicReady || !scannerRef.current) return;
+    const INTERVAL = 1000 / 8; // 8fps
+    let lastRun = 0;
+
+    async function detect(now) {
+      rafRef.current = requestAnimationFrame(detect);
+      if (now - lastRun < INTERVAL) return;
+      lastRun = now;
+
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || video.readyState < 2 || capturing) return;
+
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return;
+
+      // Draw current frame to canvas
+      canvas.width = vw; canvas.height = vh;
+      canvas.getContext("2d").drawImage(video, 0, 0, vw, vh);
+
+      let rawCorners = null;
+      try {
+        const result = await scannerRef.current.scan(canvas, {
+          mode: "detect",
+          maxProcessingDimension: 640,
+          enableDetectionCascade: true,
+        });
+
+        if (result.success && result.corners) {
+          // Scanic returns named corners: topLeft, topRight, bottomRight, bottomLeft
+          const c = result.corners;
+          rawCorners = [
+            { x: c.topLeft.x, y: c.topLeft.y },
+            { x: c.topRight.x, y: c.topRight.y },
+            { x: c.bottomRight.x, y: c.bottomRight.y },
+            { x: c.bottomLeft.x, y: c.bottomLeft.y },
+          ];
+        }
+      } catch {}
+
+      // ── Temporal smoothing ────────────────────────────────────────────────
+      const smooth = smoothRef.current;
+      if (rawCorners) {
+        smooth.push(rawCorners);
+        if (smooth.length > SMOOTH_FRAMES) smooth.shift();
+      } else {
+        if (smooth.length > 0) smooth.shift();
+      }
+
+      let smoothedCorners = null;
+      if (smooth.length >= CONFIRM_FRAMES) {
+        smoothedCorners = smooth[0].map((_, ci) => ({
+          x: smooth.reduce((s, f) => s + f[ci].x, 0) / smooth.length,
+          y: smooth.reduce((s, f) => s + f[ci].y, 0) / smooth.length,
+        }));
+      }
+
+      // ── Hysteresis ────────────────────────────────────────────────────────
+      let displayCorners = null;
+      if (smoothedCorners) {
+        const locked = lockedRef.current;
+        if (locked) {
+          const drift = smoothedCorners.reduce((max, c, i) =>
+            Math.max(max, Math.abs(c.x - locked[i].x), Math.abs(c.y - locked[i].y)), 0);
+          lockedRef.current = drift < LOCK_DRIFT
+            ? locked.map((lc, i) => ({ x: lc.x * 0.6 + smoothedCorners[i].x * 0.4, y: lc.y * 0.6 + smoothedCorners[i].y * 0.4 }))
+            : smoothedCorners;
+        } else {
+          lockedRef.current = smoothedCorners;
+        }
+        displayCorners = lockedRef.current;
+      } else {
+        lockedRef.current = null;
+      }
+
+      updateOverlay(displayCorners, vw, vh);
+
+      // ── Stability → auto capture ──────────────────────────────────────────
+      if (displayCorners) {
+        const s = stableRef.current;
+        const same = s.corners && displayCorners.every((c, i) =>
+          Math.abs(c.x - s.corners[i].x) < 8 && Math.abs(c.y - s.corners[i].y) < 8
+        );
+        if (same && Date.now() - s.since >= STABILITY_MS) {
+          stableRef.current = { corners: null, since: null };
+          doCapture(displayCorners, canvas, vw, vh);
+        } else if (!same) {
+          stableRef.current = { corners: displayCorners, since: Date.now() };
+        }
+        setDetected(true);
+        setStatus("Hold steady…");
+      } else {
+        stableRef.current = { corners: null, since: null };
+        setDetected(false);
+        setStatus("Point camera at ticket");
+      }
+    }
+
+    rafRef.current = requestAnimationFrame(detect);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanicReady, capturing]);
+
+  function updateOverlay(corners, vw, vh) {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    if (!corners) { overlay.innerHTML = ""; return; }
+    const rect = overlay.getBoundingClientRect();
+    const sx = rect.width / vw, sy = rect.height / vh;
+    const pts = corners.map(c => `${c.x * sx},${c.y * sy}`).join(" ");
+    overlay.innerHTML = `
+      <polygon points="${pts}" fill="rgba(30,58,95,0.12)" stroke="#1e3a5f" stroke-width="2.5" stroke-dasharray="8,4"/>
+      ${corners.map(c => `<circle cx="${c.x * sx}" cy="${c.y * sy}" r="7" fill="#1e3a5f"/>`).join("")}
+    `;
+  }
+
+  async function doCapture(corners, srcCanvas, vw, vh) {
+    if (capturing) return;
+    setCapturing(true);
+    setStatus("Capturing…");
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+    try {
+      // Use Scanic to extract with perspective correction
+      const scCorners = {
+        topLeft: corners[0],
+        topRight: corners[1],
+        bottomRight: corners[2],
+        bottomLeft: corners[3],
+      };
+
+      const { extractDocument } = await import("scanic");
+      const result = await extractDocument(srcCanvas, scCorners, {
+        output: "dataurl",
+        maxOutputDimension: MAX_LONG_EDGE,
+      });
+
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+
+      if (result && result.output) {
+        onCapture(result.output);
+      } else {
+        // Fallback: full frame
+        onCapture(srcCanvas.toDataURL("image/jpeg", JPEG_QUALITY));
+      }
+    } catch {
+      // Fallback: full frame
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      onCapture(srcCanvas.toDataURL("image/jpeg", JPEG_QUALITY));
+    }
+  }
+
+  function manualCapture() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+    const vw = video.videoWidth, vh = video.videoHeight;
+    canvas.width = vw; canvas.height = vh;
+    canvas.getContext("2d").drawImage(video, 0, 0, vw, vh);
+
+    const corners = lockedRef.current || stableRef.current.corners;
+    if (corners) {
+      doCapture(corners, canvas, vw, vh);
+    } else {
+      setCapturing(true);
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+      onCapture(canvas.toDataURL("image/jpeg", JPEG_QUALITY));
+    }
+  }
+
+  return (
+    <div style={SS.scannerWrap}>
+      <video ref={videoRef} style={SS.video} playsInline muted autoPlay />
+      <svg ref={overlayRef} style={SS.overlay} />
+
+      {!detected && !capturing && (
+        <div style={SS.guideFrame}>
+          <div style={{...SS.guideCorner,...SS.guideCornerTL}}/>
+          <div style={{...SS.guideCorner,...SS.guideCornerTR}}/>
+          <div style={{...SS.guideCorner,...SS.guideCornerBL}}/>
+          <div style={{...SS.guideCorner,...SS.guideCornerBR}}/>
+        </div>
+      )}
+
+      <div style={SS.statusBar}>
+        <div style={{...SS.statusDot,...(detected ? SS.statusDotGreen : {})}}/>
+        <span style={SS.statusText}>{error || status}</span>
+        {!scanicReady && !error && (
+          <span style={SS.loadingBadge}>Loading…</span>
+        )}
+      </div>
+
+      {detected && !capturing && (
+        <div style={SS.stabilityWrap}>
+          <div style={SS.stabilityBar}/>
+        </div>
+      )}
+
+      <div style={SS.controls}>
+        <button style={SS.closeBtn} onClick={onClose}>✕ Cancel</button>
+        <button style={{...SS.captureBtn,...(capturing ? SS.captureBtnCapturing : {})}}
+          onClick={manualCapture} disabled={capturing}>
+          <div style={SS.captureRing}><div style={SS.captureInner}/></div>
+        </button>
+        <div style={{width:80}}/>
+      </div>
+      <canvas ref={canvasRef} style={{display:"none"}}/>
+    </div>
+  );
+}
+
+const SS = {
+  scannerWrap: { position:"fixed", inset:0, background:"#000", zIndex:200, display:"flex", flexDirection:"column" },
+  video: { position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover" },
+  overlay: { position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none" },
+  guideFrame: { position:"absolute", inset:"15%", border:"2px solid rgba(255,255,255,0.3)", borderRadius:8, pointerEvents:"none" },
+  guideCorner: { position:"absolute", width:24, height:24, borderColor:"#fff", borderStyle:"solid" },
+  guideCornerTL: { top:-2, left:-2, borderWidth:"3px 0 0 3px", borderRadius:"4px 0 0 0" },
+  guideCornerTR: { top:-2, right:-2, borderWidth:"3px 3px 0 0", borderRadius:"0 4px 0 0" },
+  guideCornerBL: { bottom:-2, left:-2, borderWidth:"0 0 3px 3px", borderRadius:"0 0 0 4px" },
+  guideCornerBR: { bottom:-2, right:-2, borderWidth:"0 3px 3px 0", borderRadius:"0 0 4px 0" },
+  statusBar: { position:"absolute", top:0, left:0, right:0, padding:"52px 20px 12px", background:"linear-gradient(to bottom, rgba(0,0,0,0.7), transparent)", display:"flex", alignItems:"center", gap:8 },
+  statusDot: { width:8, height:8, borderRadius:"50%", background:"#94a3b8", flexShrink:0 },
+  statusDotGreen: { background:"#22c55e", boxShadow:"0 0 6px #22c55e" },
+  statusText: { color:"#fff", fontSize:14, fontWeight:600 },
+  loadingBadge: { marginLeft:"auto", fontSize:11, color:"rgba(255,255,255,.6)", background:"rgba(255,255,255,.1)", padding:"3px 10px", borderRadius:20 },
+  stabilityWrap: { position:"absolute", bottom:120, left:"50%", transform:"translateX(-50%)", width:160, height:4, background:"rgba(255,255,255,.2)", borderRadius:4, overflow:"hidden" },
+  stabilityBar: { height:"100%", background:"#22c55e", borderRadius:4, animation:`stabilityFill ${STABILITY_MS}ms linear forwards` },
+  controls: { position:"absolute", bottom:0, left:0, right:0, padding:"20px 20px 40px", display:"flex", alignItems:"center", justifyContent:"space-between", background:"linear-gradient(to top, rgba(0,0,0,0.7), transparent)" },
+  closeBtn: { background:"rgba(255,255,255,.15)", border:"none", color:"#fff", fontWeight:600, fontSize:14, padding:"10px 16px", borderRadius:20, cursor:"pointer" },
+  captureBtn: { width:72, height:72, borderRadius:"50%", background:"transparent", border:"none", cursor:"pointer", padding:0 },
+  captureBtnCapturing: { opacity:.5 },
+  captureRing: { width:72, height:72, borderRadius:"50%", border:"3px solid #fff", display:"flex", alignItems:"center", justifyContent:"center" },
+  captureInner: { width:56, height:56, borderRadius:"50%", background:"#fff" },
+};
+
+
+
 // ── LIVE DOCUMENT SCANNER (powered by Scanic ML) ──────────────────────────
 function LiveDocumentScanner({ onCapture, onClose }) {
   const videoRef = useRef(null);

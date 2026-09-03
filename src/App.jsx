@@ -43,190 +43,11 @@ function periodLabel(period) {
 }
 
 // ── SCANNER CONSTANTS ─────────────────────────────────────────────────────
-const SCAN_FPS = 12;
-const STABILITY_MS = 600;
-const MIN_AREA_RATIO = 0.20; // document must be at least 20% of frame area
 const MAX_LONG_EDGE = 2000;
 const JPEG_QUALITY = 0.85;
+const STABILITY_MS = 800;
 
-// ── DOCUMENT DETECTION HELPERS ───────────────────────────────────────────
-
-// Pass 1: Hough Transform — finds dominant straight lines and scores quads
-// (Dropbox/CamScanner approach: edges → lines → intersections → best quad)
-function detectWithHough(cv, src, dw, dh, minArea, scale) {
-  const gray = new cv.Mat();
-  const blurred = new cv.Mat();
-  const edges = new cv.Mat();
-  const lines = new cv.Mat();
-  let corners = null;
-  try {
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-    // Auto thresholds via Otsu
-    const hi = cv.threshold(blurred, new cv.Mat(), 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-    cv.Canny(blurred, edges, hi * 0.5, hi);
-    const k = cv.Mat.ones(3, 3, cv.CV_8U);
-    cv.dilate(edges, edges, k); k.delete();
-    cv.HoughLinesP(edges, lines, 1, Math.PI / 180, 50, dw * 0.1, 20);
-    if (lines.rows < 4) throw new Error("not enough lines");
-    const lineObjs = [];
-    for (let i = 0; i < lines.rows; i++) {
-      const x1=lines.data32S[i*4],y1=lines.data32S[i*4+1],x2=lines.data32S[i*4+2],y2=lines.data32S[i*4+3];
-      const len=Math.sqrt((x2-x1)**2+(y2-y1)**2);
-      const angle=Math.atan2(y2-y1,x2-x1);
-      lineObjs.push({x1,y1,x2,y2,len,angle});
-    }
-    const horizontal=lineObjs.filter(l=>Math.abs(Math.cos(l.angle))>0.5).sort((a,b)=>b.len-a.len);
-    const vertical=lineObjs.filter(l=>Math.abs(Math.sin(l.angle))>0.5).sort((a,b)=>b.len-a.len);
-    if (horizontal.length<2||vertical.length<2) throw new Error("not enough H/V lines");
-    const topH=mergeParallelLines(horizontal.slice(0,8),true);
-    const topV=mergeParallelLines(vertical.slice(0,8),false);
-    if (topH.length<2||topV.length<2) throw new Error("not enough merged lines");
-    const intersections=[];
-    for (const h of topH) for (const v of topV) {
-      const pt=lineIntersect(h,v);
-      if (pt&&pt.x>=-dw*0.1&&pt.x<=dw*1.1&&pt.y>=-dh*0.1&&pt.y<=dh*1.1) intersections.push(pt);
-    }
-    if (intersections.length<4) throw new Error("not enough intersections");
-    const best=findBestQuad(intersections,dw,dh,minArea);
-    if (best) corners=best.map(pt=>({x:pt.x/scale,y:pt.y/scale}));
-  } catch {}
-  gray.delete(); blurred.delete(); edges.delete(); lines.delete();
-  return corners;
-}
-
-function mergeParallelLines(lines,isHorizontal) {
-  const merged=[],used=new Set(),DIST=20;
-  for (let i=0;i<lines.length;i++) {
-    if (used.has(i)) continue;
-    const group=[lines[i]]; used.add(i);
-    for (let j=i+1;j<lines.length;j++) {
-      if (used.has(j)) continue;
-      const d=isHorizontal?Math.abs(lines[i].y1-lines[j].y1):Math.abs(lines[i].x1-lines[j].x1);
-      if (d<DIST) {group.push(lines[j]);used.add(j);}
-    }
-    merged.push(group.reduce((a,b)=>a.len>b.len?a:b));
-  }
-  return merged;
-}
-
-function lineIntersect(l1,l2) {
-  const dx1=l1.x2-l1.x1,dy1=l1.y2-l1.y1,dx2=l2.x2-l2.x1,dy2=l2.y2-l2.y1;
-  const d=dx1*dy2-dy1*dx2;
-  if (Math.abs(d)<1e-6) return null;
-  const t=((l2.x1-l1.x1)*dy2-(l2.y1-l1.y1)*dx2)/d;
-  return {x:l1.x1+t*dx1,y:l1.y1+t*dy1};
-}
-
-function quadArea(pts) {
-  let a=0;
-  for (let i=0;i<pts.length;i++){const j=(i+1)%pts.length;a+=pts[i].x*pts[j].y-pts[j].x*pts[i].y;}
-  return Math.abs(a)/2;
-}
-
-function orderQuadCorners(pts) {
-  const cx=pts.reduce((s,p)=>s+p.x,0)/4,cy=pts.reduce((s,p)=>s+p.y,0)/4;
-  return [
-    pts.filter(p=>p.x<=cx&&p.y<=cy)[0]||pts[0],
-    pts.filter(p=>p.x>cx&&p.y<=cy)[0]||pts[1],
-    pts.filter(p=>p.x>cx&&p.y>cy)[0]||pts[2],
-    pts.filter(p=>p.x<=cx&&p.y>cy)[0]||pts[3],
-  ];
-}
-
-function findBestQuad(pts, dw, dh, minArea) {
-  const c=pts.slice(0,8),n=c.length;
-  let best=null,bestArea=0;
-
-  const MIN_QUAD_AREA = dw * dh * 0.20;
-
-  for (let a=0;a<n-3;a++) for (let b=a+1;b<n-2;b++) for (let cc=b+1;cc<n-1;cc++) for (let d=cc+1;d<n;d++) {
-    const ordered=orderQuadCorners([c[a],c[b],c[cc],c[d]]);
-    const area=quadArea(ordered);
-    if (area<Math.max(minArea, MIN_QUAD_AREA)) continue;
-
-    const xs=ordered.map(p=>p.x),ys=ordered.map(p=>p.y);
-    const qw=Math.max(...xs)-Math.min(...xs);
-    const qh=Math.max(...ys)-Math.min(...ys);
-    const r=Math.max(qw,qh)/(Math.min(qw,qh)||1);
-    if (r<1.2||r>5.5) continue;
-
-    // Simply pick the largest quad — document boundary is always outermost
-    if (area > bestArea) {
-      bestArea = area;
-      best = ordered;
-    }
-  }
-  return best;
-}
-
-// Pass 2: HSV white paper detection
-function detectPaperRegion(cv, src, dw, dh, minArea, scale) {
-  const hsv=new cv.Mat(),mask=new cv.Mat(),closed=new cv.Mat(),contours=new cv.MatVector(),hierarchy=new cv.Mat();
-  let corners=null;
-  try {
-    cv.cvtColor(src,hsv,cv.COLOR_RGBA2RGB); cv.cvtColor(hsv,hsv,cv.COLOR_RGB2HSV);
-    const lower=new cv.Mat(hsv.rows,hsv.cols,hsv.type(),[0,0,160,0]);
-    const upper=new cv.Mat(hsv.rows,hsv.cols,hsv.type(),[180,55,255,255]);
-    cv.inRange(hsv,lower,upper,mask); lower.delete(); upper.delete();
-    const ck=cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(15,15));
-    cv.morphologyEx(mask,closed,cv.MORPH_CLOSE,ck); ck.delete();
-    cv.findContours(closed,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
-    let maxArea=0,best=null;
-    for (let i=0;i<contours.size();i++) {
-      const cnt=contours.get(i),area=cv.contourArea(cnt);
-      if (area<minArea){cnt.delete();continue;}
-      const peri=cv.arcLength(cnt,true),approx=new cv.Mat();
-      cv.approxPolyDP(cnt,approx,0.02*peri,true);
-      if (approx.rows===4&&area>maxArea) {
-        const xs=Array.from({length:4},(_,j)=>approx.data32S[j*2]);
-        const ys=Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
-        const r=Math.max(...xs)-Math.min(...xs),rh=Math.max(...ys)-Math.min(...ys);
-        const ratio=Math.max(r,rh)/Math.min(r,rh);
-        if (ratio>=1.2&&ratio<=5.0){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
-      }
-      approx.delete(); cnt.delete();
-    }
-    corners=best;
-  } catch {}
-  hsv.delete();mask.delete();closed.delete();contours.delete();hierarchy.delete();
-  return corners;
-}
-
-// Pass 3: Adaptive threshold fallback
-function detectAdaptive(cv, src, dw, dh, minArea, scale) {
-  const gray=new cv.Mat(),blurred=new cv.Mat(),thresh=new cv.Mat(),closed=new cv.Mat(),contours=new cv.MatVector(),hierarchy=new cv.Mat();
-  let corners=null;
-  try {
-    cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray,blurred,new cv.Size(5,5),0);
-    cv.adaptiveThreshold(blurred,thresh,255,cv.ADAPTIVE_THRESH_GAUSSIAN_C,cv.THRESH_BINARY,11,2);
-    cv.bitwise_not(thresh,thresh);
-    const ck=cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(7,7));
-    cv.morphologyEx(thresh,closed,cv.MORPH_CLOSE,ck); ck.delete();
-    cv.findContours(closed,contours,hierarchy,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
-    let maxArea=0,best=null;
-    for (let i=0;i<contours.size();i++) {
-      const cnt=contours.get(i),area=cv.contourArea(cnt);
-      if (area<minArea){cnt.delete();continue;}
-      const peri=cv.arcLength(cnt,true),approx=new cv.Mat();
-      cv.approxPolyDP(cnt,approx,0.03*peri,true);
-      if (approx.rows===4&&area>maxArea) {
-        const xs=Array.from({length:4},(_,j)=>approx.data32S[j*2]);
-        const ys=Array.from({length:4},(_,j)=>approx.data32S[j*2+1]);
-        const r=Math.max(...xs)-Math.min(...xs),rh=Math.max(...ys)-Math.min(...ys);
-        const ratio=Math.max(r,rh)/Math.min(r,rh);
-        if (ratio>=1.2&&ratio<=5.0){maxArea=area;best=Array.from({length:4},(_,j)=>({x:approx.data32S[j*2]/scale,y:approx.data32S[j*2+1]/scale}));}
-      }
-      approx.delete(); cnt.delete();
-    }
-    corners=best;
-  } catch {}
-  gray.delete();blurred.delete();thresh.delete();closed.delete();contours.delete();hierarchy.delete();
-  return corners;
-}
-
-// ── LIVE DOCUMENT SCANNER ─────────────────────────────────────────────────
+// ── LIVE DOCUMENT SCANNER (powered by Scanic ML) ──────────────────────────
 function LiveDocumentScanner({ onCapture, onClose }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -234,36 +55,45 @@ function LiveDocumentScanner({ onCapture, onClose }) {
   const streamRef = useRef(null);
   const rafRef = useRef(null);
   const stableRef = useRef({ corners: null, since: null });
-  const smoothRef = useRef([]); // rolling window of last N detections
-  const lockedRef = useRef(null); // currently locked quad (hysteresis)
-  const SMOOTH_FRAMES = 5; // average over last 5 frames
-  const CONFIRM_FRAMES = 3; // need 3 consecutive detections before showing
-  const LOCK_DRIFT = 40; // pixels — how much drift before switching locked quad
-  const [cvLoaded, setCvLoaded] = useState(window.cvReady);
+  const smoothRef = useRef([]);
+  const lockedRef = useRef(null);
+  const scanicRef = useRef(null);
+  const SMOOTH_FRAMES = 4;
+  const CONFIRM_FRAMES = 3;
+  const LOCK_DRIFT = 30;
+
   const [status, setStatus] = useState("Initializing camera…");
   const [detected, setDetected] = useState(false);
   const [capturing, setCapturing] = useState(false);
+  const [scanicReady, setScanicReady] = useState(false);
   const [error, setError] = useState(null);
 
-  // Wait for OpenCV
+  // Load Scanic
   useEffect(() => {
-    if (window.cvReady) { setCvLoaded(true); return; }
-    const cb = () => setCvLoaded(true);
-    window.cvReadyCallbacks.push(cb);
-    return () => { window.cvReadyCallbacks = window.cvReadyCallbacks.filter(f => f !== cb); };
+    let cancelled = false;
+    async function loadScanic() {
+      try {
+        const mod = await import("scanic");
+        if (!cancelled) {
+          scanicRef.current = mod;
+          setScanicReady(true);
+        }
+      } catch (err) {
+        console.warn("Scanic failed to load:", err);
+        if (!cancelled) setScanicReady(false);
+      }
+    }
+    loadScanic();
+    return () => { cancelled = true; };
   }, []);
 
-  // Start camera stream
+  // Start camera
   useEffect(() => {
     let cancelled = false;
     async function startCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
           audio: false,
         });
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
@@ -271,9 +101,9 @@ function LiveDocumentScanner({ onCapture, onClose }) {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          setStatus("Point camera at ticket");
+          setStatus(scanicReady ? "Point camera at ticket" : "Loading ML detector…");
         }
-      } catch (err) {
+      } catch {
         if (!cancelled) setError("Camera access denied. Use the manual option below.");
       }
     }
@@ -285,109 +115,98 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     };
   }, []);
 
+  // Update status when Scanic loads
+  useEffect(() => {
+    if (scanicReady && videoRef.current?.readyState >= 2) {
+      setStatus("Point camera at ticket");
+    }
+  }, [scanicReady]);
+
   // Detection loop
   useEffect(() => {
-    if (!cvLoaded || !videoRef.current) return;
-    const cv = window.cv;
-    const INTERVAL = 1000 / SCAN_FPS;
+    if (!scanicReady) return;
+    const INTERVAL = 1000 / 8; // 8fps for ML detection
     let lastRun = 0;
 
-    function detect(now) {
+    async function detect(now) {
       rafRef.current = requestAnimationFrame(detect);
       if (now - lastRun < INTERVAL) return;
       lastRun = now;
+
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      if (!video || !canvas || video.readyState < 2) return;
+      if (!video || !canvas || video.readyState < 2 || capturing) return;
 
       const vw = video.videoWidth, vh = video.videoHeight;
       if (!vw || !vh) return;
-      const scale = 480 / vw;
-      const dw = 480, dh = Math.round(vh * scale);
+
+      // Downsample to 640px for detection speed
+      const scale = 640 / vw;
+      const dw = 640, dh = Math.round(vh * scale);
       canvas.width = dw; canvas.height = dh;
       canvas.getContext("2d").drawImage(video, 0, 0, dw, dh);
 
-      // ── Detection ────────────────────────────────────────────────────────
       let rawCorners = null;
       try {
-        const src = cv.imread(canvas);
-        const minArea = dw * dh * MIN_AREA_RATIO;
-        rawCorners = detectWithHough(cv, src, dw, dh, minArea, scale)
-          || detectPaperRegion(cv, src, dw, dh, minArea, scale)
-          || detectAdaptive(cv, src, dw, dh, minArea, scale);
-        src.delete();
+        const result = await scanicRef.current.scanDocument(canvas, { detector: "ml" });
+        if (result.success && result.corners && result.score > 0.4) {
+          // Scale corners back to full video resolution
+          rawCorners = result.corners.map(c => ({
+            x: c.x / scale,
+            y: c.y / scale,
+          }));
+        }
       } catch {}
 
-      // ── Aspect ratio filter — tickets are landscape 1.5:1 to 4:1 ─────────
-      if (rawCorners) {
-        const xs = rawCorners.map(c => c.x), ys = rawCorners.map(c => c.y);
-        const w = Math.max(...xs) - Math.min(...xs);
-        const h = Math.max(...ys) - Math.min(...ys);
-        const ratio = Math.max(w, h) / (Math.min(w, h) || 1);
-        if (ratio < 1.4 || ratio > 4.5) rawCorners = null;
-      }
-
-      // ── Temporal smoothing — rolling window of last N frames ──────────────
+      // ── Temporal smoothing ────────────────────────────────────────────────
       const smooth = smoothRef.current;
       if (rawCorners) {
         smooth.push(rawCorners);
         if (smooth.length > SMOOTH_FRAMES) smooth.shift();
       } else {
-        // Decay — gradually remove old detections
         if (smooth.length > 0) smooth.shift();
       }
 
-      // ── Confidence threshold — need CONFIRM_FRAMES consecutive hits ───────
+      // Need CONFIRM_FRAMES consecutive hits
       let smoothedCorners = null;
       if (smooth.length >= CONFIRM_FRAMES) {
-        // Average corner positions across the window
         smoothedCorners = smooth[0].map((_, ci) => ({
           x: smooth.reduce((s, f) => s + f[ci].x, 0) / smooth.length,
           y: smooth.reduce((s, f) => s + f[ci].y, 0) / smooth.length,
         }));
       }
 
-      // ── Hysteresis — don't switch quads unless drift is significant ────────
+      // ── Hysteresis ────────────────────────────────────────────────────────
       let displayCorners = null;
       if (smoothedCorners) {
         const locked = lockedRef.current;
         if (locked) {
           const drift = smoothedCorners.reduce((max, c, i) =>
             Math.max(max, Math.abs(c.x - locked[i].x), Math.abs(c.y - locked[i].y)), 0);
-          if (drift < LOCK_DRIFT) {
-            // Drift is small — keep locked quad, just nudge it slightly
-            lockedRef.current = locked.map((lc, i) => ({
-              x: lc.x * 0.7 + smoothedCorners[i].x * 0.3,
-              y: lc.y * 0.7 + smoothedCorners[i].y * 0.3,
-            }));
-          } else {
-            // Significant drift — update to new position
-            lockedRef.current = smoothedCorners;
-          }
+          lockedRef.current = drift < LOCK_DRIFT
+            ? locked.map((lc, i) => ({ x: lc.x * 0.6 + smoothedCorners[i].x * 0.4, y: lc.y * 0.6 + smoothedCorners[i].y * 0.4 }))
+            : smoothedCorners;
         } else {
           lockedRef.current = smoothedCorners;
         }
         displayCorners = lockedRef.current;
       } else {
-        // No detection — slowly fade out locked quad
         lockedRef.current = null;
       }
 
       // ── Update overlay ────────────────────────────────────────────────────
       updateOverlay(displayCorners, vw, vh);
 
-      // ── Stability check for auto-capture ─────────────────────────────────
+      // ── Stability check → auto capture ───────────────────────────────────
       if (displayCorners) {
         const s = stableRef.current;
         const same = s.corners && displayCorners.every((c, i) =>
           Math.abs(c.x - s.corners[i].x) < 8 && Math.abs(c.y - s.corners[i].y) < 8
         );
-        if (same) {
-          if (Date.now() - s.since >= STABILITY_MS) {
-            stableRef.current = { corners: null, since: null };
-            doCapture(displayCorners, video);
-          }
-        } else {
+        if (same && Date.now() - s.since >= STABILITY_MS) {
+          stableRef.current = { corners: null, since: null };
+          doCapture(displayCorners, video);
+        } else if (!same) {
           stableRef.current = { corners: displayCorners, since: Date.now() };
         }
         setDetected(true);
@@ -400,23 +219,20 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     }
 
     rafRef.current = requestAnimationFrame(detect);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cvLoaded]);
+  }, [scanicReady, capturing]);
 
   function updateOverlay(corners, vw, vh) {
     const overlay = overlayRef.current;
     if (!overlay) return;
-    if (!corners) {
-      overlay.innerHTML = "";
-      return;
-    }
+    if (!corners) { overlay.innerHTML = ""; return; }
     const rect = overlay.getBoundingClientRect();
     const sx = rect.width / vw, sy = rect.height / vh;
     const pts = corners.map(c => `${c.x * sx},${c.y * sy}`).join(" ");
     overlay.innerHTML = `
-      <polygon points="${pts}" fill="rgba(30,58,95,0.15)" stroke="#1e3a5f" stroke-width="3" stroke-dasharray="8,4"/>
-      ${corners.map(c => `<circle cx="${c.x * sx}" cy="${c.y * sy}" r="8" fill="#1e3a5f"/>`).join("")}
+      <polygon points="${pts}" fill="rgba(30,58,95,0.12)" stroke="#1e3a5f" stroke-width="2.5" stroke-dasharray="8,4"/>
+      ${corners.map(c => `<circle cx="${c.x * sx}" cy="${c.y * sy}" r="7" fill="#1e3a5f"/>`).join("")}
     `;
   }
 
@@ -427,13 +243,10 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
 
     try {
-      const cv = window.cv;
       const vw = video.videoWidth, vh = video.videoHeight;
-
-      // Order corners: top-left, top-right, bottom-right, bottom-left
       const ordered = orderCorners(corners);
 
-      // Compute output size from longest edges
+      // Compute output dimensions
       const w1 = dist(ordered[0], ordered[1]), w2 = dist(ordered[3], ordered[2]);
       const h1 = dist(ordered[0], ordered[3]), h2 = dist(ordered[1], ordered[2]);
       let outW = Math.round(Math.max(w1, w2));
@@ -444,41 +257,44 @@ function LiveDocumentScanner({ onCapture, onClose }) {
         outW = Math.round(outW * s); outH = Math.round(outH * s);
       }
 
-      // Full-res capture
-      const fullCanvas = document.createElement("canvas");
-      fullCanvas.width = vw; fullCanvas.height = vh;
-      fullCanvas.getContext("2d").drawImage(video, 0, 0, vw, vh);
-      const src = cv.imread(fullCanvas);
-      const dst = new cv.Mat();
-      const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-        ordered[0].x, ordered[0].y,
-        ordered[1].x, ordered[1].y,
-        ordered[2].x, ordered[2].y,
-        ordered[3].x, ordered[3].y,
-      ]);
-      const dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-        0, 0, outW, 0, outW, outH, 0, outH,
-      ]);
-      const M = cv.getPerspectiveTransform(srcPts, dstPts);
-      cv.warpPerspective(src, dst, M, new cv.Size(outW, outH));
+      // Perspective warp using canvas
+      const src = document.createElement("canvas");
+      src.width = vw; src.height = vh;
+      src.getContext("2d").drawImage(video, 0, 0, vw, vh);
 
-      const outCanvas = document.createElement("canvas");
-      outCanvas.width = outW; outCanvas.height = outH;
-      cv.imshow(outCanvas, dst);
-      src.delete(); dst.delete(); srcPts.delete(); dstPts.delete(); M.delete();
+      // Use Scanic's extraction if available
+      const out = document.createElement("canvas");
+      out.width = outW; out.height = outH;
 
-      const dataUrl = outCanvas.toDataURL("image/jpeg", JPEG_QUALITY);
+      if (scanicRef.current?.extractDocument) {
+        const extracted = await scanicRef.current.extractDocument(src, ordered, { width: outW, height: outH });
+        out.getContext("2d").drawImage(extracted, 0, 0, outW, outH);
+      } else {
+        // Manual perspective warp fallback
+        warpPerspective(src, out, ordered, outW, outH);
+      }
+
+      const dataUrl = out.toDataURL("image/jpeg", JPEG_QUALITY);
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
       onCapture(dataUrl);
-    } catch (err) {
-      // Fallback: capture full frame without warp
-      const fallback = document.createElement("canvas");
-      fallback.width = video.videoWidth; fallback.height = video.videoHeight;
-      fallback.getContext("2d").drawImage(video, 0, 0);
-      const dataUrl = fallback.toDataURL("image/jpeg", JPEG_QUALITY);
+    } catch {
+      // Fallback: full frame
+      const fb = document.createElement("canvas");
+      fb.width = video.videoWidth; fb.height = video.videoHeight;
+      fb.getContext("2d").drawImage(video, 0, 0);
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-      onCapture(dataUrl);
+      onCapture(fb.toDataURL("image/jpeg", JPEG_QUALITY));
     }
+  }
+
+  // Simple perspective warp fallback (no OpenCV)
+  function warpPerspective(srcCanvas, dstCanvas, corners, dw, dh) {
+    const ctx = dstCanvas.getContext("2d");
+    // Simple bilinear crop — not full perspective but better than nothing
+    const xs = corners.map(c => c.x), ys = corners.map(c => c.y);
+    const sx = Math.min(...xs), sy = Math.min(...ys);
+    const sw = Math.max(...xs) - sx, sh = Math.max(...ys) - sy;
+    ctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, dw, dh);
   }
 
   function manualCapture() {
@@ -487,40 +303,37 @@ function LiveDocumentScanner({ onCapture, onClose }) {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setCapturing(true);
     const corners = lockedRef.current || stableRef.current.corners;
-    if (corners && window.cvReady) {
+    if (corners) {
       doCapture(corners, video);
     } else {
-      const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-      canvas.getContext("2d").drawImage(video, 0, 0);
-      const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+      const fb = document.createElement("canvas");
+      fb.width = video.videoWidth; fb.height = video.videoHeight;
+      fb.getContext("2d").drawImage(video, 0, 0);
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-      onCapture(dataUrl);
+      onCapture(fb.toDataURL("image/jpeg", JPEG_QUALITY));
     }
   }
 
   function orderCorners(pts) {
-    const center = { x: pts.reduce((s,p)=>s+p.x,0)/4, y: pts.reduce((s,p)=>s+p.y,0)/4 };
-    const tl = pts.filter(p=>p.x<=center.x&&p.y<=center.y)[0]||pts[0];
-    const tr = pts.filter(p=>p.x>center.x&&p.y<=center.y)[0]||pts[1];
-    const br = pts.filter(p=>p.x>center.x&&p.y>center.y)[0]||pts[2];
-    const bl = pts.filter(p=>p.x<=center.x&&p.y>center.y)[0]||pts[3];
-    return [tl,tr,br,bl];
+    const cx = pts.reduce((s, p) => s + p.x, 0) / 4;
+    const cy = pts.reduce((s, p) => s + p.y, 0) / 4;
+    const tl = pts.filter(p => p.x <= cx && p.y <= cy)[0] || pts[0];
+    const tr = pts.filter(p => p.x > cx && p.y <= cy)[0] || pts[1];
+    const br = pts.filter(p => p.x > cx && p.y > cy)[0] || pts[2];
+    const bl = pts.filter(p => p.x <= cx && p.y > cy)[0] || pts[3];
+    return [tl, tr, br, bl];
   }
 
   function dist(a, b) {
-    return Math.sqrt((b.x-a.x)**2+(b.y-a.y)**2);
+    return Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2);
   }
 
   return (
     <div style={SS.scannerWrap}>
-      {/* Video feed */}
       <video ref={videoRef} style={SS.video} playsInline muted autoPlay />
-
-      {/* Detection overlay */}
       <svg ref={overlayRef} style={SS.overlay} />
 
-      {/* Corner guide when no detection */}
+      {/* Guide corners when no detection */}
       {!detected && !capturing && (
         <div style={SS.guideFrame}>
           <div style={{...SS.guideCorner,...SS.guideCornerTL}}/>
@@ -532,9 +345,11 @@ function LiveDocumentScanner({ onCapture, onClose }) {
 
       {/* Status bar */}
       <div style={SS.statusBar}>
-        <div style={{...SS.statusDot,...(detected?SS.statusDotGreen:{})}}/>
-        <span style={SS.statusText}>{error||status}</span>
-        {!cvLoaded && <span style={SS.loadingBadge}>Loading scanner…</span>}
+        <div style={{...SS.statusDot,...(detected ? SS.statusDotGreen : {})}}/>
+        <span style={SS.statusText}>{error || status}</span>
+        {!scanicReady && !error && (
+          <span style={SS.loadingBadge}>Loading ML…</span>
+        )}
       </div>
 
       {/* Stability progress */}
@@ -547,22 +362,17 @@ function LiveDocumentScanner({ onCapture, onClose }) {
       {/* Controls */}
       <div style={SS.controls}>
         <button style={SS.closeBtn} onClick={onClose}>✕ Cancel</button>
-        <button style={{...SS.captureBtn,...(capturing?SS.captureBtnCapturing:{})}}
+        <button style={{...SS.captureBtn,...(capturing ? SS.captureBtnCapturing : {})}}
           onClick={manualCapture} disabled={capturing}>
-          <div style={SS.captureRing}>
-            <div style={SS.captureInner}/>
-          </div>
+          <div style={SS.captureRing}><div style={SS.captureInner}/></div>
         </button>
-        <div style={{width:80}}/>
+        <div style={{width: 80}}/>
       </div>
-
-      {/* Canvas for processing — hidden */}
       <canvas ref={canvasRef} style={{display:"none"}}/>
     </div>
   );
 }
 
-// Scanner styles
 const SS = {
   scannerWrap: { position:"fixed", inset:0, background:"#000", zIndex:200, display:"flex", flexDirection:"column" },
   video: { position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover" },
@@ -588,7 +398,7 @@ const SS = {
   captureInner: { width:56, height:56, borderRadius:"50%", background:"#fff" },
 };
 
-// ── BROKER COLORS ─────────────────────────────────────────────────────────
+
 const BROKER_COLORS = ["#1e3a5f","#16a34a","#7c3aed","#ea580c","#0891b2","#be185d","#854d0e","#065f46"];
 function brokerColor(brokers, name) {
   const idx = brokers.findIndex(b=>b.name===name);
